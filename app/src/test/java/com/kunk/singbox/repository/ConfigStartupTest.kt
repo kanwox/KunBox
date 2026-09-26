@@ -63,6 +63,21 @@ class ConfigStartupTest {
     }
 
     @Test
+    fun fallbackValidationKeepsHealthyDetourChainWhenAnotherNodeIsInvalid() {
+        val hop = Outbound(type = "socks", tag = "hop")
+        val node = Outbound(type = "trojan", tag = "node", detour = "hop")
+        val bad = Outbound(type = "trojan", tag = "bad")
+
+        val result = filterRuntimeOutbounds(listOf(node, hop, bad)) { candidates ->
+            candidates.none { it.tag == "bad" } && candidates.all { candidate ->
+                candidate.detour == null || candidates.any { it.tag == candidate.detour }
+            }
+        }
+
+        assertEquals(listOf(node, hop), result)
+    }
+
+    @Test
     fun startupUsesSavedProfileAndValidatesCompleteConfigBeforeWriting() {
         val body = File("src/main/java/com/kunk/singbox/repository/configrepo/ConfigRepositoryPart5.kt")
             .readText(Charsets.UTF_8)

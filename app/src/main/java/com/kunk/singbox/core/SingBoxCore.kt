@@ -53,7 +53,18 @@ internal fun filterRuntimeOutbounds(
     val candidates = outbounds.filterNot { it.type in uncheckedTypes }
     // ponytail: 正常订阅只做一次批量校验；有坏节点时才回退到逐个过滤。
     if (candidates.isEmpty() || validate(candidates)) return outbounds
-    return outbounds.filter { it.type in uncheckedTypes || validate(listOf(it)) }
+    val byTag = outbounds.associateBy(Outbound::tag)
+    fun withDetours(outbound: Outbound): List<Outbound> {
+        val required = linkedMapOf<String, Outbound>()
+        fun add(current: Outbound) {
+            if (current.tag in required) return
+            required[current.tag] = current
+            current.detour?.let(byTag::get)?.let(::add)
+        }
+        add(outbound)
+        return required.values.toList()
+    }
+    return outbounds.filter { it.type in uncheckedTypes || validate(withDetours(it)) }
 }
 
 enum class LatencyProbeTrafficKind {
