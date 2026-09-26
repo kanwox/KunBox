@@ -28,6 +28,20 @@ class DataExportRepositoryTest {
     }
 
     @Test
+    fun importedRuleSetsStayOffWithoutVerifiedCacheAndCanDownloadWhileDisabled() {
+        val settingsSource = File("src/main/java/com/kunk/singbox/repository/SettingsRepository.kt")
+            .readText(Charsets.UTF_8)
+        val importSource = File("src/main/java/com/kunk/singbox/repository/DataExportRepository.kt")
+            .readText(Charsets.UTF_8)
+
+        assertTrue(settingsSource.contains("ruleSet.copy(enabled = ready)"))
+        assertTrue(settingsSource.contains("!RuleSetRepository.canUseLegacyRuleSetCache(ruleSet, previous)"))
+        assertTrue(settingsSource.contains("allowNetwork = false"))
+        assertTrue(importSource.contains("ruleSetRepository.prefetchRuleSet(ruleSet, forceUpdate = true)"))
+        assertTrue(importSource.contains("settingsImported && options.importRules"))
+    }
+
+    @Test
     fun `settings export and rollback snapshots keep full theme style settings`() {
         val source = File("src/main/java/com/kunk/singbox/repository/DataExportRepository.kt").readText()
 

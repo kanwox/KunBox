@@ -210,37 +210,26 @@ internal fun ConfigRepository.isValidRuleSetStructuredText(content: String): Boo
 internal fun ConfigRepository.buildCustomRuleSets(settings: AppSettings): List<RuleSetConfig> {
     val ruleSetRepo = RuleSetRepository.getInstance(context)
 
-    val rules = settings.ruleSets.filter { it.enabled }.map { ruleSet ->
-        if (ruleSet.type == RuleSetType.REMOTE) {
-            val localPath = ruleSetRepo.getRuleSetPath(ruleSet.tag)
-            val file = File(localPath)
-            val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
-            if (detectedFormat != null) {
-                RuleSetConfig(
-                    tag = ruleSet.tag,
-                    type = "local",
-                    format = detectedFormat,
-                    path = localPath
-                )
-            } else null
+    return settings.ruleSets.filter { it.enabled }.map { ruleSet ->
+        val localPath = if (ruleSet.type == RuleSetType.REMOTE) {
+            ruleSetRepo.getRuleSetPath(ruleSet.tag)
         } else {
-            val file = File(ruleSet.path)
-            val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
-            if (detectedFormat != null) {
-                RuleSetConfig(
-                    tag = ruleSet.tag,
-                    type = "local",
-                    format = detectedFormat,
-                    path = ruleSet.path
-                )
-            } else {
-                Log.w(ConfigRepository.TAG, "Local rule set file not found: ${ruleSet.tag} (${ruleSet.path})")
-                null
-            }
+            ruleSet.path
         }
-    }.filterNotNull().toMutableList()
+        val file = File(localPath)
+        val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
+        check(detectedFormat != null &&
+            (ruleSet.type != RuleSetType.REMOTE || ruleSetRepo.isRemoteRuleSetReady(ruleSet))) {
+            "启用的规则集 ${ruleSet.tag} 未下载、来源不符或文件无效"
+        }
 
-    return rules
+        RuleSetConfig(
+            tag = ruleSet.tag,
+            type = "local",
+            format = detectedFormat,
+            path = localPath
+        )
+    }
 }
 
 internal fun ConfigRepository.buildCustomDomainRules(

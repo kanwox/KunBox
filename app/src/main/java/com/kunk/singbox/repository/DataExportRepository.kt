@@ -9,6 +9,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonSyntaxException
 // import com.kunk.singbox.BuildConfig // Build config is usually in root package or needs verification
 import com.kunk.singbox.model.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -285,14 +286,26 @@ class DataExportRepository(private val context: Context) {
                 )
             }
 
-            if (settingsImported && exportData.settings.ruleSets.isNotEmpty()) {
-                Log.i(TAG, "Triggering rule set download after import...")
-                repositoryScope.launch {
-                    try {
-                        ruleSetRepository.ensureRuleSetsReady(forceUpdate = false, allowNetwork = true) {
+            if (settingsImported && options.importRules) {
+                val pendingRuleSets = exportData.settings.ruleSets.filter { ruleSet ->
+                    ruleSet.enabled && ruleSet.type == RuleSetType.REMOTE &&
+                        settingsRepository.settings.value.ruleSets.any { it.id == ruleSet.id && !it.enabled }
+                }
+                if (pendingRuleSets.isNotEmpty()) {
+                    repositoryScope.launch {
+                        pendingRuleSets.forEach { ruleSet ->
+                            try {
+                                // ponytail: 导入保持离线可用；后台只下载，不自动开启，避免覆盖用户后续的关闭操作。
+                                if (ruleSetRepository.prefetchRuleSet(ruleSet, forceUpdate = true)) {
+                                    Log.i(TAG, "Imported rule set ${ruleSet.tag} downloaded; enable it in settings")
+                                } else {
+                                    Log.w(TAG, "Imported rule set ${ruleSet.tag} was not downloaded")
+                                }
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                Log.e(TAG, "Failed to download imported rule set ${ruleSet.tag}", e)
+                            }
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to download rule sets after import", e)
                     }
                 }
             }

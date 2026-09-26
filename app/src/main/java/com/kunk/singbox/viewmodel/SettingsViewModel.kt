@@ -37,6 +37,7 @@ import com.kunk.singbox.repository.PerAppPolicyUpdateResult
 import com.kunk.singbox.service.RuleSetAutoUpdateWorker
 import com.kunk.singbox.service.root.RootCapabilityReport
 import com.kunk.singbox.service.root.RootServiceConnection
+import com.kunk.singbox.ui.components.AppNotificationManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -509,6 +510,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    @Suppress("CognitiveComplexMethod")
     fun addRuleSet(ruleSet: RuleSet, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             val normalizedRuleSet = RuleSetRepository.normalizeRuleSetForSave(
@@ -516,25 +518,34 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 mirrorUrl = settings.value.ghProxyMirror.url
             )
 
-            val currentSets = repository.getRuleSets().toMutableList()
-            val exists = currentSets.any { it.tag == normalizedRuleSet.tag }
+            val exists = repository.getRuleSets().any { it.tag == normalizedRuleSet.tag }
             if (exists) {
                 onResult(false, getApplication<Application>().getString(R.string.rulesets_exists, normalizedRuleSet.tag))
             } else {
-                currentSets.add(normalizedRuleSet)
-                repository.setRuleSets(currentSets)
-
                 if (normalizedRuleSet.type == RuleSetType.REMOTE) {
                     markRuleSetDownloading(normalizedRuleSet.tag)
                 }
 
                 val downloadOk = try {
-                    ruleSetRepository.prefetchRuleSet(normalizedRuleSet, forceUpdate = false, allowNetwork = true)
+                    // ponytail: 按 tag 命名的旧缓存无法证明 URL 来源；新建远程规则集总要实际下载一次。
+                    ruleSetRepository.prefetchRuleSet(
+                        normalizedRuleSet,
+                        forceUpdate = normalizedRuleSet.type == RuleSetType.REMOTE,
+                        allowNetwork = true
+                    )
                 } finally {
                     if (normalizedRuleSet.type == RuleSetType.REMOTE) {
                         markRuleSetDownloadFinished(normalizedRuleSet.tag)
                     }
                 }
+
+                val latestSets = repository.getRuleSets().toMutableList()
+                if (latestSets.any { it.tag == normalizedRuleSet.tag }) {
+                    onResult(false, getApplication<Application>().getString(R.string.rulesets_exists, normalizedRuleSet.tag))
+                    return@launch
+                }
+                latestSets.add(normalizedRuleSet.copy(enabled = normalizedRuleSet.enabled && downloadOk))
+                repository.setRuleSets(latestSets)
 
                 if (downloadOk) {
                     onResult(true, getApplication<Application>().getString(R.string.rulesets_added_downloaded, normalizedRuleSet.tag))
@@ -547,76 +558,96 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun addRuleSets(ruleSets: List<RuleSet>, onResult: (Int) -> Unit = { _ -> }) {
         viewModelScope.launch {
-            val currentSets = repository.getRuleSets().toMutableList()
             val addedRuleSets = mutableListOf<RuleSet>()
+            val seenTags = repository.getRuleSets().mapTo(mutableSetOf()) { it.tag }
 
-            fun normalizeRuleSet(ruleSet: RuleSet): RuleSet {
-                return RuleSetRepository.normalizeRuleSetForSave(
+            ruleSets.forEach { ruleSet ->
+                val normalized = RuleSetRepository.normalizeRuleSetForSave(
                     ruleSet = ruleSet,
                     mirrorUrl = settings.value.ghProxyMirror.url
                 )
-            }
+                if (!seenTags.add(normalized.tag)) return@forEach
 
-            ruleSets.forEach { ruleSet ->
-                val normalized = normalizeRuleSet(ruleSet)
-                val exists = currentSets.any { it.tag == normalized.tag }
-                if (!exists) {
-                    currentSets.add(normalized)
-                    addedRuleSets.add(normalized)
+                if (normalized.type == RuleSetType.REMOTE) {
+                    markRuleSetDownloading(normalized.tag)
                 }
-            }
-
-            repository.setRuleSets(currentSets)
-
-            // Best-effort prefetch for newly added rule sets.
-            addedRuleSets.forEach { ruleSet ->
-                if (ruleSet.type == RuleSetType.REMOTE) {
-                    markRuleSetDownloading(ruleSet.tag)
-                }
-                launch {
-                    try {
-                        ruleSetRepository.prefetchRuleSet(ruleSet, forceUpdate = false, allowNetwork = true)
-                    } finally {
-                        if (ruleSet.type == RuleSetType.REMOTE) {
-                            markRuleSetDownloadFinished(ruleSet.tag)
-                        }
+                val ready = try {
+                    ruleSetRepository.prefetchRuleSet(
+                        normalized,
+                        forceUpdate = normalized.type == RuleSetType.REMOTE,
+                        allowNetwork = normalized.type == RuleSetType.REMOTE
+                    )
+                } finally {
+                    if (normalized.type == RuleSetType.REMOTE) {
+                        markRuleSetDownloadFinished(normalized.tag)
                     }
                 }
+
+                addedRuleSets.add(normalized.copy(enabled = normalized.enabled && ready))
             }
 
-            onResult(addedRuleSets.size)
+            val latestSets = repository.getRuleSets()
+            val latestTags = latestSets.mapTo(mutableSetOf()) { it.tag }
+            val newSets = addedRuleSets.filter { latestTags.add(it.tag) }
+            if (newSets.isNotEmpty()) repository.setRuleSets(latestSets + newSets)
+            onResult(newSets.size)
         }
     }
 
+    @Suppress("CognitiveComplexMethod", "CyclomaticComplexMethod")
     fun updateRuleSet(ruleSet: RuleSet) {
         viewModelScope.launch {
             val normalizedRuleSet = RuleSetRepository.normalizeRuleSetForSave(
                 ruleSet = ruleSet,
                 mirrorUrl = settings.value.ghProxyMirror.url
             )
-            val currentSets = settings.value.ruleSets.toMutableList()
+            val currentSets = repository.getRuleSets().toMutableList()
             val index = currentSets.indexOfFirst { it.id == normalizedRuleSet.id }
-            if (index != -1) {
-                val previous = currentSets[index]
-                currentSets[index] = normalizedRuleSet
-                repository.setRuleSets(currentSets)
+            if (index == -1) return@launch
 
-                if (!previous.enabled && normalizedRuleSet.enabled && normalizedRuleSet.type == RuleSetType.REMOTE) {
-                    if (tryMarkRuleSetDownloading(normalizedRuleSet.tag)) {
-                        launch {
-                            try {
-                                ruleSetRepository.prefetchRuleSet(
-                                    normalizedRuleSet,
-                                    forceUpdate = false,
-                                    allowNetwork = true
-                                )
-                            } finally {
-                                markRuleSetDownloadFinished(normalizedRuleSet.tag)
-                            }
-                        }
+            val previous = currentSets[index]
+            val sourceChanged = previous.type != normalizedRuleSet.type ||
+                previous.tag != normalizedRuleSet.tag ||
+                previous.format != normalizedRuleSet.format ||
+                previous.url != normalizedRuleSet.url ||
+                previous.path != normalizedRuleSet.path
+            val needsReadyRuleSet = normalizedRuleSet.enabled
+            val isRemote = normalizedRuleSet.type == RuleSetType.REMOTE
+            if (needsReadyRuleSet && isRemote && !tryMarkRuleSetDownloading(normalizedRuleSet.tag)) {
+                return@launch
+            }
+
+            val ready = if (needsReadyRuleSet) {
+                try {
+                    ruleSetRepository.prefetchRuleSet(
+                        normalizedRuleSet,
+                        forceUpdate = isRemote && sourceChanged,
+                        allowNetwork = isRemote,
+                        requireSource = isRemote && !previous.enabled
+                    )
+                } finally {
+                    if (isRemote) {
+                        markRuleSetDownloadFinished(normalizedRuleSet.tag)
                     }
                 }
+            } else {
+                true
             }
+            if (!ready) {
+                Log.w("SettingsViewModel", "Rule set ${normalizedRuleSet.tag} was not enabled: file not ready")
+                AppNotificationManager.showMessage(
+                    getApplication(),
+                    getApplication<Application>().getString(R.string.rulesets_enable_failed, normalizedRuleSet.tag)
+                )
+                return@launch
+            }
+
+            // ponytail: 下载可耗时；重新读取列表，避免用旧快照覆盖期间的设置变更。
+            val latestSets = repository.getRuleSets().toMutableList()
+            val latestIndex = latestSets.indexOfFirst { it.id == normalizedRuleSet.id }
+            if (latestIndex == -1 || latestSets[latestIndex] != currentSets[index]) return@launch
+            latestSets[latestIndex] = normalizedRuleSet
+            repository.setRuleSets(latestSets)
         }
     }
 
@@ -666,7 +697,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun reorderRuleSets(newOrder: List<RuleSet>) {
         viewModelScope.launch {
-            repository.setRuleSets(newOrder)
+            // ponytail: 拖拽快照可能过时；只取排序，启用状态等字段始终取最新值。
+            val latestSets = repository.getRuleSets()
+            val byId = latestSets.associateBy { it.id }
+            val orderedIds = newOrder.map { it.id }.toSet()
+            repository.setRuleSets(newOrder.mapNotNull { byId[it.id] } + latestSets.filter { it.id !in orderedIds })
         }
     }
 

@@ -34,6 +34,9 @@ class RuleSetRepository(private val context: Context) {
         private const val RULE_SET_MIN_SIZE_BYTES = 10L
         private const val RULE_SET_BINARY_MAGIC = "SRS"
         private const val RULE_SET_VALIDATION_SAMPLE_BYTES = 1024
+        private const val LEGACY_BUNDLED_ADS_SIZE = 5865L
+        private const val LEGACY_BUNDLED_ADS_SHA256 =
+            "a3f0420fb7c6fb3663a401426411d17827a01bc4418ff6112d578e54b71374ae"
 
         private val REGEX_RULE_SET_ERROR_TEXT = Regex(
             "^(error|forbidden|not found|404|403|401|429|500|access denied|" +
@@ -117,6 +120,64 @@ class RuleSetRepository(private val context: Context) {
 
         internal fun isRemoteRuleSetReadyAfterDownloadFailure(fileExists: Boolean, forceUpdate: Boolean): Boolean {
             return fileExists && !forceUpdate
+        }
+
+        internal fun ruleSetSourceKey(ruleSet: RuleSet): String {
+            return MessageDigest.getInstance("SHA-256")
+                .digest("${ruleSet.url}\n${ruleSet.format}".toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
+
+        internal fun canUseLegacyRuleSetCache(ruleSet: RuleSet, previous: RuleSet?): Boolean =
+            previous?.enabled == true && previous.tag == ruleSet.tag && previous.type == ruleSet.type &&
+                previous.url == ruleSet.url && previous.format == ruleSet.format
+
+        internal fun isRemoteRuleSetCacheReady(ruleSet: RuleSet, file: File, requireSource: Boolean = false): Boolean {
+            return try {
+                if (!file.isFile || !isDownloadedRuleSetFileValid(file, ruleSet.format)) return false
+                val sourceFile = File(file.parentFile, "${file.name}.source")
+                if (sourceFile.isFile) return sourceFile.readText() == ruleSetSourceKey(ruleSet)
+                // ponytail: 旧版缓存没有来源记录；沿用相同已启用来源，但新启用必须下载，且不信任内置广告规则。
+                !requireSource && !isLegacyBundledAdsFile(ruleSet, file)
+            } catch (e: Exception) {
+                Log.w(TAG, "Rule set cache is unreadable: ${ruleSet.tag}", e)
+                false
+            }
+        }
+
+        private fun isLegacyBundledAdsFile(ruleSet: RuleSet, file: File): Boolean {
+            if (ruleSet.tag != "geosite-category-ads-all" || file.length() != LEGACY_BUNDLED_ADS_SIZE) return false
+            val digest = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+            return digest.joinToString("") { "%02x".format(it) } == LEGACY_BUNDLED_ADS_SHA256
+        }
+
+        private fun isDownloadedRuleSetFileValid(file: File, format: String): Boolean {
+            if (file.length() < RULE_SET_MIN_SIZE_BYTES) return false
+            if (isSourceFormat(format)) {
+                return isSourceRuleSetFileValid(file)
+            }
+
+            val sample = readValidationSample(file)
+            val header = sample.toString(Charsets.ISO_8859_1)
+            return isDownloadedRuleSetContentValid(header, file.length(), format)
+        }
+
+        private fun isSourceRuleSetFileValid(file: File): Boolean {
+            return runCatching {
+                InputStreamReader(file.inputStream(), Charsets.UTF_8).use { streamReader ->
+                    JsonReader(streamReader).use { reader ->
+                        readSourceRuleSetJson(reader)
+                    }
+                }
+            }.getOrDefault(false)
+        }
+
+        private fun readValidationSample(file: File): ByteArray {
+            return file.inputStream().use { input ->
+                val buffer = ByteArray(RULE_SET_VALIDATION_SAMPLE_BYTES)
+                val read = input.read(buffer)
+                if (read > 0) buffer.copyOf(read) else ByteArray(0)
+            }
         }
 
         internal fun createDownloadTempFile(targetFile: File): File {
@@ -306,15 +367,18 @@ class RuleSetRepository(private val context: Context) {
     suspend fun hasLocalCache(): Boolean = withContext(Dispatchers.IO) {
         val settings = settingsRepository.settings.first()
 
-        settings.ruleSets.filter { it.enabled && it.type == RuleSetType.REMOTE }.forEach { ruleSet ->
-            if (!getRuleSetFile(ruleSet.tag).exists()) {
-                return@withContext false
+        settings.ruleSets.filter { it.enabled }.all { ruleSet ->
+            when (ruleSet.type) {
+                RuleSetType.LOCAL -> File(ruleSet.path).isFile
+                RuleSetType.REMOTE -> {
+                    val file = getRuleSetFile(ruleSet.tag)
+                    isRemoteRuleSetCacheReady(ruleSet, file)
+                }
             }
         }
-
-        true
     }
 
+    @Suppress("CognitiveComplexMethod")
     suspend fun ensureRuleSetsReady(
         forceUpdate: Boolean = false,
         allowNetwork: Boolean = false,
@@ -323,30 +387,36 @@ class RuleSetRepository(private val context: Context) {
         val settings = settingsRepository.settings.first()
         var allReady = true
 
-        settings.ruleSets.filter { it.enabled && it.type == RuleSetType.REMOTE }.forEach { ruleSet ->
-            val file = getRuleSetFile(ruleSet.tag)
-
-            if (!file.exists()) {
-                installBaselineRuleSet(ruleSet.tag, file)
-            }
-
-            if (
-                shouldDownloadRemoteRuleSet(
-                    fileExists = file.exists(),
-                    allowNetwork = allowNetwork,
-                    forceUpdate = forceUpdate,
-                    isExpired = file.exists() && isExpired(file)
-                )
-            ) {
-                onProgress("Updating rule set ${ruleSet.tag}...")
-                val success = downloadCustomRuleSet(ruleSet, settings)
-                if (!success && !isRemoteRuleSetReadyAfterDownloadFailure(file.exists(), forceUpdate)) {
-                    allReady = false
-                    Log.e(TAG, "Failed to download rule set ${ruleSet.tag} and no cache available")
+        settings.ruleSets.filter { it.enabled }.forEach { ruleSet ->
+            when (ruleSet.type) {
+                RuleSetType.LOCAL -> {
+                    if (!File(ruleSet.path).isFile) {
+                        allReady = false
+                        Log.w(TAG, "Local rule set ${ruleSet.tag} is missing: ${ruleSet.path}")
+                    }
                 }
-            } else if (!file.exists()) {
-                allReady = false
-                Log.w(TAG, "Rule set ${ruleSet.tag} missing, and network download is disabled")
+                RuleSetType.REMOTE -> {
+                    val file = getRuleSetFile(ruleSet.tag)
+                    val cacheReady = isRemoteRuleSetCacheReady(ruleSet, file)
+                    val shouldUpdate = shouldDownloadRemoteRuleSet(
+                        fileExists = cacheReady,
+                        allowNetwork = allowNetwork,
+                        forceUpdate = forceUpdate,
+                        isExpired = file.isFile && isExpired(file)
+                    )
+
+                    if (shouldUpdate) {
+                        onProgress("Updating rule set ${ruleSet.tag}...")
+                        val success = downloadCustomRuleSet(ruleSet, settings)
+                        if (!success && !isRemoteRuleSetReadyAfterDownloadFailure(cacheReady, forceUpdate)) {
+                            allReady = false
+                            Log.e(TAG, "Failed to download rule set ${ruleSet.tag} and no valid cache available")
+                        }
+                    } else if (!cacheReady) {
+                        allReady = false
+                        Log.w(TAG, "Rule set ${ruleSet.tag} is not downloaded or invalid")
+                    }
+                }
             }
         }
 
@@ -356,53 +426,32 @@ class RuleSetRepository(private val context: Context) {
     suspend fun prefetchRuleSet(
         ruleSet: RuleSet,
         forceUpdate: Boolean = false,
-        allowNetwork: Boolean = true
+        allowNetwork: Boolean = true,
+        requireSource: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
-        if (!ruleSet.enabled) return@withContext true
-
         val settings = settingsRepository.settings.first()
 
         return@withContext when (ruleSet.type) {
-            RuleSetType.LOCAL -> File(ruleSet.path).exists()
+            RuleSetType.LOCAL -> File(ruleSet.path).isFile
             RuleSetType.REMOTE -> {
                 val file = getRuleSetFile(ruleSet.tag)
-                if (!file.exists()) {
-                    installBaselineRuleSet(ruleSet.tag, file)
-                }
+                val cacheReady = isRemoteRuleSetCacheReady(ruleSet, file, requireSource)
                 if (!allowNetwork) {
-                    file.exists()
+                    cacheReady
                 } else if (
                     shouldDownloadRemoteRuleSet(
-                        fileExists = file.exists(),
+                        fileExists = cacheReady,
                         allowNetwork = true,
                         forceUpdate = forceUpdate,
-                        isExpired = file.exists() && isExpired(file)
+                        isExpired = file.isFile && isExpired(file)
                     )
                 ) {
                     val success = downloadCustomRuleSet(ruleSet, settings)
-                    success || isRemoteRuleSetReadyAfterDownloadFailure(file.exists(), forceUpdate)
+                    success || isRemoteRuleSetReadyAfterDownloadFailure(cacheReady, forceUpdate)
                 } else {
-                    true
+                    cacheReady
                 }
             }
-        }
-    }
-
-    private fun installBaselineRuleSet(tag: String, targetFile: File): Boolean {
-        return try {
-            val assetPath = "rulesets/$tag.srs"
-
-            context.assets.open(assetPath).use { input ->
-                targetFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            Log.i(TAG, "Baseline rule set installed: ${targetFile.name}")
-            true
-        } catch (e: Exception) {
-
-            Log.w(TAG, "Baseline rule set not found in assets: $tag")
-            false
         }
     }
 
@@ -410,8 +459,25 @@ class RuleSetRepository(private val context: Context) {
         return getRuleSetFile(tag).absolutePath
     }
 
+    internal fun isRemoteRuleSetReady(ruleSet: RuleSet): Boolean {
+        return isRemoteRuleSetCacheReady(ruleSet, getRuleSetFile(ruleSet.tag))
+    }
+
     private fun getRuleSetFile(tag: String): File {
         return File(ruleSetDir, ruleSetCacheFileName(tag))
+    }
+
+    private fun confirmRemoteDownload(ruleSet: RuleSet): Boolean {
+        return runCatching {
+            val sourceFile = File(ruleSetDir, "${ruleSetCacheFileName(ruleSet.tag)}.source")
+            val tempFile = createDownloadTempFile(sourceFile)
+            try {
+                tempFile.writeText(ruleSetSourceKey(ruleSet))
+                replaceRuleSetFile(tempFile, sourceFile)
+            } finally {
+                tempFile.delete()
+            }
+        }.onFailure { Log.e(TAG, "Failed to record downloaded rule set: ${ruleSet.tag}", it) }.getOrDefault(false)
     }
 
     private fun isExpired(file: File): Boolean {
@@ -431,11 +497,12 @@ class RuleSetRepository(private val context: Context) {
         val mirrorUrlString = normalizeRuleSetUrl(ruleSet.url, mirrorUrl)
         val success = downloadFileWithFallback(mirrorUrlString, getRuleSetFile(ruleSet.tag), settings, ruleSet.format)
 
-        if (success) return true
+        if (success) return confirmRemoteDownload(ruleSet)
 
         if (mirrorUrlString != ruleSet.url) {
             Log.w(TAG, "Mirror download failed, trying original URL: ${ruleSet.url}")
-            return downloadFileWithFallback(ruleSet.url, getRuleSetFile(ruleSet.tag), settings, ruleSet.format)
+            return downloadFileWithFallback(ruleSet.url, getRuleSetFile(ruleSet.tag), settings, ruleSet.format) &&
+                confirmRemoteDownload(ruleSet)
         }
 
         return false
@@ -523,35 +590,6 @@ class RuleSetRepository(private val context: Context) {
             false
         } finally {
             tempFile?.takeIf { it.exists() }?.delete()
-        }
-    }
-
-    private fun isDownloadedRuleSetFileValid(file: File, format: String): Boolean {
-        if (file.length() < RULE_SET_MIN_SIZE_BYTES) return false
-        if (isSourceFormat(format)) {
-            return isSourceRuleSetFileValid(file)
-        }
-
-        val sample = readValidationSample(file)
-        val header = sample.toString(Charsets.ISO_8859_1)
-        return isDownloadedRuleSetContentValid(header, file.length(), format)
-    }
-
-    private fun isSourceRuleSetFileValid(file: File): Boolean {
-        return runCatching {
-            InputStreamReader(file.inputStream(), Charsets.UTF_8).use { streamReader ->
-                JsonReader(streamReader).use { reader ->
-                    readSourceRuleSetJson(reader)
-                }
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun readValidationSample(file: File): ByteArray {
-        return file.inputStream().use { input ->
-            val buffer = ByteArray(RULE_SET_VALIDATION_SAMPLE_BYTES)
-            val read = input.read(buffer)
-            if (read > 0) buffer.copyOf(read) else ByteArray(0)
         }
     }
 
