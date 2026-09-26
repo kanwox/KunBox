@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.kunk.singbox.model.RuleSet
+import com.kunk.singbox.model.RuleSetType
 import java.io.File
 
 class RuleSetRepositoryTest {
@@ -118,6 +120,90 @@ class RuleSetRepositoryTest {
                 format = "source"
             )
         )
+    }
+
+    @Test
+    fun defaultDisabledRuleSetsAreStillPrefetched() {
+        val source = File("src/main/java/com/kunk/singbox/repository/RuleSetRepository.kt")
+            .readText(Charsets.UTF_8)
+        val prefetchBody = source.substringAfter("suspend fun prefetchRuleSet(")
+            .substringBefore("fun getRuleSetPath(")
+
+        assertFalse(prefetchBody.contains("if (!ruleSet.enabled) return@withContext true"))
+    }
+
+    @Test
+    fun startupReadinessDoesNotInstallBundledRuleSetAsRemoteCache() {
+        val source = File("src/main/java/com/kunk/singbox/repository/RuleSetRepository.kt")
+            .readText(Charsets.UTF_8)
+
+        assertFalse(source.contains("installBaselineRuleSet"))
+        assertTrue(source.contains("isDownloadedRuleSetFileValid(file, ruleSet.format)"))
+    }
+
+    @Test
+    fun cacheSourceKeyChangesWithUrlAndFormat() {
+        val ruleSet = RuleSet(tag = "same-tag", type = RuleSetType.REMOTE, url = "https://a.example/a.srs")
+        val firstKey = RuleSetRepository.ruleSetSourceKey(ruleSet)
+
+        assertEquals(64, firstKey.length)
+        assertFalse(firstKey == RuleSetRepository.ruleSetSourceKey(ruleSet.copy(url = "https://b.example/b.srs")))
+        assertFalse(firstKey == RuleSetRepository.ruleSetSourceKey(ruleSet.copy(format = "source")))
+    }
+
+    @Test
+    fun missingOrInvalidCacheCannotBeEnabled() {
+        val dir = java.nio.file.Files.createTempDirectory("ruleset_cache_").toFile()
+        try {
+            val file = File(dir, "geosite-cn.srs")
+            val ruleSet = RuleSet(tag = "geosite-cn", type = RuleSetType.REMOTE, url = "https://example.org/cn.srs")
+            assertFalse(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet, file, requireSource = true))
+            file.writeText("not a valid rule set")
+            File(dir, "${file.name}.source").writeText(RuleSetRepository.ruleSetSourceKey(ruleSet))
+            assertFalse(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet, file, requireSource = true))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun enablingRemoteRuleSetRequiresVerifiedMatchingSource() {
+        val dir = java.nio.file.Files.createTempDirectory("ruleset_cache_").toFile()
+        try {
+            val file = File(dir, "geosite-cn.srs")
+            val marker = File(dir, "${file.name}.source")
+            val ruleSet = RuleSet(tag = "geosite-cn", type = RuleSetType.REMOTE, url = "https://example.org/cn.srs")
+            file.writeText("SRS\u0001binary-payload")
+            assertFalse(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet, file, requireSource = true))
+            assertTrue(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet, file)) // 兼容同来源的旧版已启用缓存
+            marker.writeText(RuleSetRepository.ruleSetSourceKey(ruleSet))
+            assertTrue(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet, file, requireSource = true))
+            assertFalse(
+                RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet.copy(url = "https://elsewhere.org/cn.srs"), file)
+            )
+            assertFalse(RuleSetRepository.isRemoteRuleSetCacheReady(ruleSet.copy(format = "source"), file))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyCacheOnlyAllowedForSamePreviouslyEnabledSource() {
+        val previous = RuleSet(tag = "geosite-cn", type = RuleSetType.REMOTE, url = "https://example.org/cn.srs")
+        assertTrue(RuleSetRepository.canUseLegacyRuleSetCache(previous, previous))
+        assertFalse(RuleSetRepository.canUseLegacyRuleSetCache(previous, null))
+        assertFalse(RuleSetRepository.canUseLegacyRuleSetCache(previous, previous.copy(enabled = false)))
+        assertFalse(RuleSetRepository.canUseLegacyRuleSetCache(previous.copy(url = "https://new.org/cn.srs"), previous))
+        assertFalse(RuleSetRepository.canUseLegacyRuleSetCache(previous.copy(tag = "geoip-cn"), previous))
+    }
+
+    @Test
+    fun allRuleSetWritesGuardEnabledStateEvenOutsideTheEditor() {
+        val source = File("src/main/java/com/kunk/singbox/repository/SettingsRepository.kt").readText(Charsets.UTF_8)
+        val body = source.substringAfter("suspend fun setRuleSets(").substringBefore("suspend fun getRuleSets(")
+        assertTrue(body.contains("ruleSetRepo.prefetchRuleSet("))
+        assertTrue(body.contains("allowNetwork = false"))
+        assertTrue(body.contains("ruleSet.copy(enabled = false)"))
     }
 
     @Test

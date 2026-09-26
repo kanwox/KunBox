@@ -481,7 +481,8 @@
     <string name="rulesets_unknown_profile">Unknown Profile (%s)</string>
     <string name="rulesets_exists">Rule set \"%s\" already exists</string>
     <string name="rulesets_added_downloaded">Rule set \"%s\" added and downloaded</string>
-    <string name="rulesets_added_failed">Rule set \"%s\" added but download failed</string>
+    <string name="rulesets_added_failed">Rule set \"%s\" added, but download failed; not enabled</string>
+    <string name="rulesets_enable_failed">Rule set \"%s\" failed to download or validate; change not applied</string>
 
     <!-- Rule Set Hub -->
     <string name="ruleset_hub_title">Rule Set Hub</string>

@@ -14,31 +14,6 @@ import kotlinx.coroutines.flow.*
 internal fun ConfigRepository.buildOutboundForRuntime(outbound: Outbound): Outbound? =
     OutboundFixer.buildForRuntime(context, outbound)
 
-internal fun ConfigRepository.loadConfigWithLegacyEchRepair(profile: ProfileUi?, profileId: String): SingBoxConfig? {
-    val config = loadConfig(profileId) ?: return null
-    val subscriptionUrl = profile?.url?.takeIf { it.isNotBlank() } ?: return config
-    if (!ConfigRepository.needsLegacyEchDnsRepair(config)) return config
-
-    val repairedConfig = fetchAndParseSubscription(subscriptionUrl)?.config ?: return config
-    val deduplicatedConfig = deduplicateTags(repairedConfig)
-    if (ConfigRepository.needsLegacyEchDnsRepair(deduplicatedConfig)) return config
-
-    runCatching {
-        writeConfigFileOrThrow(profileId, deduplicatedConfig)
-        cacheConfig(profileId, deduplicatedConfig)
-        val repairedNodes = extractNodesFromConfigSync(deduplicatedConfig, profileId)
-        profileNodes[profileId] = repairedNodes
-        updateAllNodesAndGroups()
-        if (_activeProfileId.value == profileId) {
-            _nodes.value = repairedNodes
-        }
-        Log.i(ConfigRepository.TAG, "Repaired legacy ECH subscription config for profile: ${profile.name}")
-    }.onFailure { e ->
-        Log.w(ConfigRepository.TAG, "Failed to persist repaired ECH subscription config for profile: $profileId", e)
-    }
-    return deduplicatedConfig
-}
-
 internal fun ConfigRepository.stripInternalMetadata(config: SingBoxConfig): SingBoxConfig {
     val runtimeOutbounds = ConfigRepository.applyDefaultOutboundDomainResolver(
         config.outbounds.orEmpty().map { stripInternalMetadata(it) },
@@ -235,37 +210,26 @@ internal fun ConfigRepository.isValidRuleSetStructuredText(content: String): Boo
 internal fun ConfigRepository.buildCustomRuleSets(settings: AppSettings): List<RuleSetConfig> {
     val ruleSetRepo = RuleSetRepository.getInstance(context)
 
-    val rules = settings.ruleSets.filter { it.enabled }.map { ruleSet ->
-        if (ruleSet.type == RuleSetType.REMOTE) {
-            val localPath = ruleSetRepo.getRuleSetPath(ruleSet.tag)
-            val file = File(localPath)
-            val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
-            if (detectedFormat != null) {
-                RuleSetConfig(
-                    tag = ruleSet.tag,
-                    type = "local",
-                    format = detectedFormat,
-                    path = localPath
-                )
-            } else null
+    return settings.ruleSets.filter { it.enabled }.map { ruleSet ->
+        val localPath = if (ruleSet.type == RuleSetType.REMOTE) {
+            ruleSetRepo.getRuleSetPath(ruleSet.tag)
         } else {
-            val file = File(ruleSet.path)
-            val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
-            if (detectedFormat != null) {
-                RuleSetConfig(
-                    tag = ruleSet.tag,
-                    type = "local",
-                    format = detectedFormat,
-                    path = ruleSet.path
-                )
-            } else {
-                Log.w(ConfigRepository.TAG, "Local rule set file not found: ${ruleSet.tag} (${ruleSet.path})")
-                null
-            }
+            ruleSet.path
         }
-    }.filterNotNull().toMutableList()
+        val file = File(localPath)
+        val detectedFormat = detectValidRuleSetFileFormat(file, ruleSet.tag)
+        check(detectedFormat != null &&
+            (ruleSet.type != RuleSetType.REMOTE || ruleSetRepo.isRemoteRuleSetReady(ruleSet))) {
+            "启用的规则集 ${ruleSet.tag} 未下载、来源不符或文件无效"
+        }
 
-    return rules
+        RuleSetConfig(
+            tag = ruleSet.tag,
+            type = "local",
+            format = detectedFormat,
+            path = localPath
+        )
+    }
 }
 
 internal fun ConfigRepository.buildCustomDomainRules(

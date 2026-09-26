@@ -481,7 +481,8 @@
     <string name="rulesets_unknown_profile">未知配置(%s)</string>
     <string name="rulesets_exists">规则集 \"%s\" 已存在</string>
     <string name="rulesets_added_downloaded">已添加规则集 \"%s\"，并完成下载</string>
-    <string name="rulesets_added_failed">已添加规则集 \"%s\"，但下载失败（稍后可手动更新）</string>
+    <string name="rulesets_added_failed">已添加规则集 \"%s\"，但下载失败，未启用</string>
+    <string name="rulesets_enable_failed">规则集 \"%s\" 下载或校验失败，未应用本次更改</string>
 
     <!-- Rule Set Hub -->
     <string name="ruleset_hub_title">规则集中心</string>

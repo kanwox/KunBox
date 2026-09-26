@@ -11,13 +11,25 @@ import com.kunk.singbox.model.IpVersionMode
 import com.kunk.singbox.model.Outbound
 import com.kunk.singbox.model.RoutingMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 @Suppress("TooManyFunctions")
 abstract class ConfigRepositoryTestPart6 : ConfigRepositoryTestPart5() {
+    @Test
+    fun enabledRuleSetCannotBeSilentlyDroppedFromConfig() {
+        val source = File("src/main/java/com/kunk/singbox/repository/configrepo/ConfigRepositoryPart6.kt")
+            .readText(Charsets.UTF_8)
+
+        assertTrue(source.contains("check(detectedFormat != null &&"))
+        assertTrue(source.contains("ruleSetRepo.isRemoteRuleSetReady(ruleSet)"))
+        assertFalse(source.contains("filterNotNull().toMutableList()"))
+    }
+
     override fun testDnsOverrideReplacesServersPrependsRulesAndOverridesTopLevelFields() {
         val base = DnsConfig(
             servers = listOf(

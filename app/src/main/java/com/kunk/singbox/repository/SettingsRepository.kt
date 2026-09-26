@@ -89,11 +89,49 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun reloadFromStorage() {
         settingsStore.reload()
+        repairInvalidEnabledRuleSets()
+    }
+
+    private suspend fun repairInvalidEnabledRuleSets() {
+        val current = settings.value
+        if (current.ruleSets.none { it.enabled }) return
+
+        val ruleSetRepo = RuleSetRepository.getInstance(context)
+        val repaired = current.ruleSets.map { ruleSet ->
+            if (!ruleSet.enabled) return@map ruleSet
+            if (ruleSetRepo.prefetchRuleSet(ruleSet, allowNetwork = false)) return@map ruleSet
+
+            Log.w("SettingsRepository", "Disabling unavailable rule set ${ruleSet.tag}")
+            ruleSet.copy(enabled = false)
+        }
+        if (repaired == current.ruleSets) return
+
+        if (!settingsStore.updateSettingsAndWait { it.copy(ruleSets = repaired) }) {
+            Log.e("SettingsRepository", "Failed to persist repaired rule set state")
+        }
     }
 
     suspend fun replaceImportedSettings(imported: AppSettings, importRules: Boolean) {
+        // ponytail: 导入不带规则集文件；未验证同来源缓存时先关闭，后台下载后由用户手动启用。
+        val safeImported = if (importRules) {
+            val previousRuleSets = settings.value.ruleSets
+            val ruleSetRepo = RuleSetRepository.getInstance(context)
+            imported.copy(ruleSets = imported.ruleSets.map { ruleSet ->
+                if (!ruleSet.enabled) return@map ruleSet
+                val previous = previousRuleSets.firstOrNull { it.tag == ruleSet.tag }
+                val ready = ruleSetRepo.prefetchRuleSet(
+                    ruleSet,
+                    allowNetwork = false,
+                    requireSource = ruleSet.type == RuleSetType.REMOTE &&
+                        !RuleSetRepository.canUseLegacyRuleSetCache(ruleSet, previous)
+                )
+                ruleSet.copy(enabled = ready)
+            })
+        } else {
+            imported
+        }
         val persisted = settingsStore.updateSettingsAndWait { current ->
-            buildImportedSettings(current = current, imported = imported, importRules = importRules)
+            buildImportedSettings(current = current, imported = safeImported, importRules = importRules)
         }
         if (!persisted) {
             throw IllegalStateException("Failed to persist imported settings")
@@ -431,7 +469,22 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setRuleSets(value: List<RuleSet>, notify: Boolean = true) {
-        val persisted = settingsStore.updateSettingsAndWait { it.copy(ruleSets = value) }
+        val previous = settings.value.ruleSets.associateBy { it.id }
+        val ruleSetRepo = RuleSetRepository.getInstance(context)
+        val safeRuleSets = value.map { ruleSet ->
+            if (!ruleSet.enabled) return@map ruleSet
+            val ready = ruleSetRepo.prefetchRuleSet(
+                ruleSet,
+                allowNetwork = false,
+                requireSource = ruleSet.type == RuleSetType.REMOTE &&
+                    !RuleSetRepository.canUseLegacyRuleSetCache(ruleSet, previous[ruleSet.id])
+            )
+            if (ready) ruleSet else {
+                Log.w("SettingsRepository", "Not enabling rule set ${ruleSet.tag}: no verified local file")
+                ruleSet.copy(enabled = false)
+            }
+        }
+        val persisted = settingsStore.updateSettingsAndWait { it.copy(ruleSets = safeRuleSets) }
         if (persisted && notify) {
             notifyRestartRequired()
         }
@@ -622,6 +675,7 @@ class SettingsRepository(private val context: Context) {
                 Log.i("SettingsRepository", "Saving migrated rule sets")
                 setRuleSets(migratedRuleSets, notify = false)
             }
+            repairInvalidEnabledRuleSets()
         } catch (e: Exception) {
             Log.e("SettingsRepository", "Error during migration", e)
         }

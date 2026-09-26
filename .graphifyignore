@@ -1,0 +1,15 @@
+node_modules/
+引用的项目/
+unused/
+build/
+**/build/
+.gradle/
+.gradle-user-home/
+.kotlin/
+.kernel-sync-local/go-cache/
+.kernel-sync-local/go-tmp/
+.kernel-sync-local/process-tmp/
+.kernel-sync-local/tmp-*/
+app/.cxx/
+artifacts/
+tmp/

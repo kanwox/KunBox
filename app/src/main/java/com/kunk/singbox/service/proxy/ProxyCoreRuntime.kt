@@ -132,11 +132,14 @@ internal fun ProxyOnlyService.startCore(configPath: String, recoveryIntentLease:
         var activeRecoveryIntentLease = recoveryIntentLease
         try {
             val ruleSetRepo = RuleSetRepository.getInstance(this@startCore)
-            runCatching {
+            val ruleSetsReady = runCatching {
                 ruleSetRepo.ensureRuleSetsReady(
                     forceUpdate = false,
                     allowNetwork = false
                 ) {}
+            }.getOrDefault(false)
+            if (!ruleSetsReady) {
+                throw IllegalStateException("Required rule sets are not ready")
             }
 
             val configFile = File(configPath)

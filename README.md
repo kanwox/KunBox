@@ -6,7 +6,7 @@
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-Material3-4285F4.svg?style=flat&logo=android)](https://developer.android.com/jetpack/compose)
 [![Sing-box](https://img.shields.io/badge/Core-Sing--box-success.svg?style=flat)](https://github.com/SagerNet/sing-box)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat)](LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-Chat-blue?style=flat&logo=telegram)](https://t.me/+978J0WfmJLk4ZmQ1)
+[![Telegram](https://img.shields.io/badge/Telegram-Chat-blue?style=flat&logo=telegram)](https://t.me/+EKxpszVkOBc1MGJl)
 [![Downloads](https://img.shields.io/github/downloads/roseforljh/KunBox/total.svg?style=flat&logo=github)](https://github.com/roseforljh/KunBox/releases)
 
 > **OLED Hyper-Minimalist**
@@ -14,7 +14,7 @@
 > A next-generation Android proxy client designed for those who pursue ultimate performance and visual purity.
 > <br/>Cut the clutter, return to the essence of networking.
 
-[Download](#-download-and-installation) • [Features](#-core-features) • [Protocols](#-protocol-matrix) • [Architecture](#-project-structure) • [Quick Start](#-build-guide) • [Community](https://t.me/+978J0WfmJLk4ZmQ1)
+[Download](#-download-and-installation) • [Features](#-core-features) • [Protocols](#-protocol-matrix) • [Architecture](#-project-structure) • [Quick Start](#-build-guide) • [Community](https://t.me/+EKxpszVkOBc1MGJl)
 
 **[中文文档](README_CN.md)**
 
@@ -32,7 +32,7 @@ Thanks to [ForZTN](https://sponsorship.forzth.com/github/roseforljh/KunBox) for 
 |:---|:---|
 | [@WestWood](https://github.com/yuedaochangmendian) | ¥30 |
 
-> Your support is our motivation for continuous development! If you wish to sponsor, please contact us via [Telegram](https://t.me/+978J0WfmJLk4ZmQ1).
+> Your support is our motivation for continuous development! If you wish to sponsor, please contact us via [Telegram](https://t.me/+EKxpszVkOBc1MGJl).
 
 ---
 

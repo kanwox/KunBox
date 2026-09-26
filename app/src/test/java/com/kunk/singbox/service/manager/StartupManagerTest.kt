@@ -15,6 +15,65 @@ class StartupManagerTest {
     }
 
     @Test
+    fun startupRequiresRuleSetsBeforeStartingCore() {
+        val startupSource = File("src/main/java/com/kunk/singbox/service/manager/StartupManager.kt")
+            .readText(Charsets.UTF_8)
+        val proxySource = File("src/main/java/com/kunk/singbox/service/proxy/ProxyCoreRuntime.kt")
+            .readText(Charsets.UTF_8)
+
+        assertTrue(startupSource.contains("if (!initResult.ruleSetReady)"))
+        assertTrue(startupSource.contains("allowNetwork = false"))
+        assertTrue(proxySource.contains("if (!ruleSetsReady)"))
+        assertTrue(proxySource.contains("Required rule sets are not ready"))
+    }
+
+    @Test
+    fun enablingRuleSetPersistsOnlyAfterPrefetchSucceeds() {
+        val source = File("src/main/java/com/kunk/singbox/viewmodel/SettingsViewModel.kt")
+            .readText(Charsets.UTF_8)
+        val updateBody = source
+            .substringAfter("fun updateRuleSet(ruleSet: RuleSet)")
+            .substringBefore("fun deleteRuleSet(ruleSetId: String)")
+
+        assertTrue(updateBody.indexOf("prefetchRuleSet") < updateBody.indexOf("repository.setRuleSets"))
+        assertTrue(updateBody.contains("requireSource = isRemote && !previous.enabled"))
+    }
+
+    @Test
+    fun addingRuleSetPersistsEnabledOnlyWhenPrefetchSucceeds() {
+        val source = File("src/main/java/com/kunk/singbox/viewmodel/SettingsViewModel.kt")
+            .readText(Charsets.UTF_8)
+        val addBody = source
+            .substringAfter("fun addRuleSet(ruleSet: RuleSet")
+            .substringBefore("fun addRuleSets(ruleSets: List<RuleSet>")
+
+        assertTrue(addBody.contains("normalizedRuleSet.copy(enabled = normalizedRuleSet.enabled && downloadOk)"))
+        assertTrue(addBody.contains("forceUpdate = normalizedRuleSet.type == RuleSetType.REMOTE"))
+    }
+
+    @Test
+    fun batchRuleSetAddDoesNotEnableUnreadyRuleSets() {
+        val source = File("src/main/java/com/kunk/singbox/viewmodel/SettingsViewModel.kt")
+            .readText(Charsets.UTF_8)
+        val addBody = source
+            .substringAfter("fun addRuleSets(ruleSets: List<RuleSet>")
+            .substringBefore("fun updateRuleSet(ruleSet: RuleSet)")
+
+        assertTrue(addBody.contains("normalized.copy(enabled = normalized.enabled && ready)"))
+        assertTrue(addBody.contains("forceUpdate = normalized.type == RuleSetType.REMOTE"))
+    }
+
+    @Test
+    fun draggingOldRuleSetSnapshotCannotReenableDisabledRuleSets() {
+        val source = File("src/main/java/com/kunk/singbox/viewmodel/SettingsViewModel.kt").readText(Charsets.UTF_8)
+        val body = source.substringAfter("fun reorderRuleSets(newOrder: List<RuleSet>)")
+            .substringBefore("fun addAppGroup(")
+
+        assertTrue(body.contains("newOrder.mapNotNull { byId[it.id] }"))
+        assertTrue(body.contains("latestSets.filter { it.id !in orderedIds }"))
+    }
+
+    @Test
     fun startupManagerBlocksLocalNetworkSettingsAndRestrictsWildcardListen() {
         val source = File("src/main/java/com/kunk/singbox/service/manager/StartupManager.kt")
             .readText(Charsets.UTF_8)
