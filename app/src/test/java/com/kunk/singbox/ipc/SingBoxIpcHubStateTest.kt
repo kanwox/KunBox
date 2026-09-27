@@ -148,6 +148,15 @@ class SingBoxIpcHubStateTest {
     }
 
     @Test
+    fun `root cleanup in progress stays visible even when cached state is stopped`() {
+        val source = File("src/main/java/com/kunk/singbox/ipc/SingBoxIpcHub.kt").readText(Charsets.UTF_8)
+            .substringAfter("private fun currentLiveCoreState()")
+            .substringBefore("internal fun resolveVisibleStateOrdinal")
+
+        assertTrue(source.contains("RootTransparentForegroundService.isStopping -> ServiceState.STOPPING"))
+    }
+
+    @Test
     fun `missing live core does not manufacture an unprotected failure`() {
         val source = File("src/main/java/com/kunk/singbox/ipc/SingBoxIpcHub.kt")
             .readText(Charsets.UTF_8)

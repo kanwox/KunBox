@@ -148,6 +148,28 @@ class RootRuntimeStateMachineTest {
     }
 
     @Test
+    fun missingOrUnverifiedRootCleanupRemainsOwnedByRootUntilVerified() {
+        assertFalse(rootFailureRequiresCleanup(RootRuntimeSnapshot(phase = RootRuntimePhase.STOPPED)))
+        assertFalse(rootFailureRequiresCleanup(RootRuntimeSnapshot(phase = RootRuntimePhase.FAILED_UNPROTECTED)))
+        assertTrue(rootFailureRequiresCleanup(RootRuntimeSnapshot(phase = RootRuntimePhase.FAILED_VERIFICATION)))
+        assertTrue(rootFailureRequiresCleanup(RootRuntimeSnapshot(phase = RootRuntimePhase.FAILED_BLOCKED)))
+        assertTrue(
+            rootFailureRequiresCleanup(
+                RootRuntimeSnapshot(phase = RootRuntimePhase.FAILED_UNPROTECTED, rulesInstalled = true)
+            )
+        )
+    }
+
+    @Test
+    fun missingRootSnapshotIsAverificationFailure() {
+        val snapshot = RootRuntimeSnapshot.fromBundle(null)
+
+        assertEquals(RootRuntimePhase.FAILED_VERIFICATION, snapshot.phase)
+        assertTrue(snapshot.error.isNotBlank())
+        assertTrue(rootFailureRequiresCleanup(snapshot))
+    }
+
+    @Test
     fun rootServiceDoesNotRepeatCleanupAfterTerminalStartFailure() {
         assertFalse(
             rootDestroyRequiresCleanup(

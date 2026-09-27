@@ -314,6 +314,7 @@ object SingBoxIpcHub {
         val vpnService = ServiceStateHolder.instance
         val vpnState = vpnService?.currentServiceState()
         return when {
+            RootTransparentForegroundService.isStopping -> ServiceState.STOPPING
             vpnState != null && vpnState != ServiceState.STOPPED -> vpnState
             ProxyOnlyService.isRunning -> ServiceState.RUNNING
             RootTransparentForegroundService.isRunning -> ServiceState.RUNNING
