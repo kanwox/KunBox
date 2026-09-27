@@ -9,14 +9,6 @@ Set-StrictMode -Version Latest
 
 $officialRemote = 'https://github.com/SagerNet/sing-box.git'
 $officialReleaseApi = 'https://api.github.com/repos/SagerNet/sing-box/releases?per_page=30'
-$trustedTagCommits = @{
-    'v1.13.14' = '25a600db24f7680ad9806ce5427bd0ab8afe1114'
-    'v1.13.15' = '3708fa18766cda1f11b77f6ed9c7bd61688f17df'
-    'v1.13.16' = '17ec3c71af8ca946dc50bf0d927c39fc77322aec'
-    'v1.13.18' = '45ca32dcb966f07f97fc888fe8586e359dbe8405'
-    'v1.13.19' = 'b5ebaa1fc0f2b94256180b95468e73ef53caa27d'
-    'v1.14.0' = '0b8995879f29a9b98ee027bc17b75e101445b238'
-}
 $trustedPatchHashes = @{
     'v1.13.14' = '4C89FE3A078F5DC68DA351BF04B1B9536D048925266E15332E5D6F2BFAB2ECE2'
     'v1.13.15' = '7C8318A5C9B77BF0BF623FA4D8610FF4190B188B9BD4D6149E0D9BF51E1B0172'
@@ -133,7 +125,6 @@ $trustedPatchFiles = @{
 $trustedDependencyPatches = @{
     'v1.13.15' = [pscustomobject]@{
         ModulePath = 'github.com/sagernet/sing-tun'
-        Version = 'v0.8.12-0.20260727151122-3a09076491df'
         FileName = 'sing-tun-v0.8.12-0.20260727151122-3a09076491df.patch'
         Hash = '19FC1E4FFAA5773BFBADCE1A33D1AF571E11E44BF59A1D18FF136B486DAE9E97'
         RequiredNativeMarker = 'system TCP connection limit reached: active='
@@ -147,7 +138,6 @@ $trustedDependencyPatches = @{
     }
     'v1.13.16' = [pscustomobject]@{
         ModulePath = 'github.com/sagernet/sing-tun'
-        Version = 'v0.8.12-0.20260727151122-3a09076491df'
         FileName = 'sing-tun-v0.8.12-0.20260727151122-3a09076491df.patch'
         Hash = '19FC1E4FFAA5773BFBADCE1A33D1AF571E11E44BF59A1D18FF136B486DAE9E97'
         RequiredNativeMarker = 'system TCP connection limit reached: active='
@@ -161,7 +151,6 @@ $trustedDependencyPatches = @{
     }
     'v1.13.18' = [pscustomobject]@{
         ModulePath = 'github.com/sagernet/sing-tun'
-        Version = 'v0.8.12-0.20260727151122-3a09076491df'
         FileName = 'sing-tun-v0.8.12-0.20260727151122-3a09076491df.patch'
         Hash = '19FC1E4FFAA5773BFBADCE1A33D1AF571E11E44BF59A1D18FF136B486DAE9E97'
         RequiredNativeMarker = 'system TCP connection limit reached: active='
@@ -175,7 +164,6 @@ $trustedDependencyPatches = @{
     }
     'v1.13.19' = [pscustomobject]@{
         ModulePath = 'github.com/sagernet/sing-tun'
-        Version = 'v0.8.12-0.20260810140523-7c73233bd0fb'
         FileName = 'sing-tun-v0.8.12-0.20260810140523-7c73233bd0fb.patch'
         Hash = '19FC1E4FFAA5773BFBADCE1A33D1AF571E11E44BF59A1D18FF136B486DAE9E97'
         RequiredNativeMarker = 'system TCP connection limit reached: active='
@@ -189,7 +177,6 @@ $trustedDependencyPatches = @{
     }
     'v1.14.0' = [pscustomobject]@{
         ModulePath = 'github.com/sagernet/sing-tun'
-        Version = 'v0.9.0-beta.4'
         FileName = 'sing-tun-v0.9.0-beta.4.patch'
         Hash = '440DFB5F154F1FAFF43EBC88C73482AC658EA71C9221E3BF72B1A78FA72B4E77'
         RequiredNativeMarker = 'system TCP connection limit reached: active='
@@ -259,6 +246,8 @@ $upstreamDir = Join-Path $tempDir 'upstream-sing-box'
 $aarCheckDir = Join-Path $tempDir 'aar-check'
 $resolvedTag = $null
 $patchFile = $null
+$patchPolicyTag = $null
+$officialCommit = $null
 $dependencyPatch = $null
 $syncSucceeded = $false
 $aarReplaced = $false
@@ -488,32 +477,38 @@ function Resolve-TargetTag {
 
     Write-Host 'Resolving latest official stable sing-box release...'
     $releases = Get-GitHubReleaseJson -url $officialReleaseApi
-    foreach ($release in @($releases)) {
-        if ($release.draft -or $release.prerelease) {
-            continue
-        }
-
-        $candidateTag = [string] $release.tag_name
-        if (-not (Test-StableOfficialTag -value $candidateTag)) {
-            continue
-        }
-
-        Write-Host "Resolved latest official stable tag: $candidateTag"
-        return $candidateTag
+    $stableTags = @($releases | Where-Object {
+            -not $_.draft -and -not $_.prerelease -and
+            (Test-StableOfficialTag -value ([string] $_.tag_name))
+        } | Sort-Object { [version] ([string] $_.tag_name).Substring(1) } -Descending)
+    if ($stableTags.Count -gt 0) {
+        $latestTag = [string] $stableTags[0].tag_name
+        Write-Host "Resolved latest official stable tag: $latestTag"
+        return $latestTag
     }
 
     Fail 'Unable to resolve the latest official stable sing-box release. GitHub returned no non-prerelease tag that matches v<major>.<minor>.<patch>.'
 }
 
 function Resolve-PatchFile([string] $targetTag) {
-    $candidate = Join-Path $patchesDir ("kunbox-$targetTag.patch")
-
-    if (-not (Test-Path $candidate)) {
-        Fail "Exact KunBox patch for $targetTag not found: $candidate. Refuse to apply a patch from another sing-box release."
+    if (-not (Test-StableOfficialTag -value $targetTag)) {
+        Fail "Only official stable tags are supported: $targetTag"
     }
-
-    Write-Host "Using exact patch for ${targetTag}: $candidate"
-    return $candidate
+    $targetVersion = [version] $targetTag.Substring(1)
+    $policyTags = @($trustedPatchHashes.Keys | Where-Object {
+            $policyVersion = [version] $_.Substring(1)
+            $policyVersion.Major -eq $targetVersion.Major -and
+            $policyVersion.Minor -eq $targetVersion.Minor -and
+            $policyVersion -le $targetVersion
+        } | Sort-Object { [version] $_.Substring(1) } -Descending)
+    foreach ($policyTag in $policyTags) {
+        $candidate = Join-Path $patchesDir ("kunbox-$policyTag.patch")
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            Write-Host "Using vetted patch $policyTag for upstream ${targetTag}: $candidate"
+            return [pscustomobject]@{ Path = $candidate; PolicyTag = $policyTag }
+        }
+    }
+    Fail "No vetted KunBox patch is available for $targetTag in the same major/minor release line"
 }
 
 function Resolve-DependencyPatch([string] $targetTag) {
@@ -547,7 +542,7 @@ function Resolve-DependencyPatch([string] $targetTag) {
         Fail "Dependency patch file set mismatch for ${targetTag}. Expected: $($policy.Files -join ', '); actual: $($actualFiles -join ', ')"
     }
 
-    Write-Host "Dependency patch policy: $($policy.ModulePath)@$($policy.Version), SHA256 and file set verified."
+    Write-Host "Dependency patch policy: $($policy.ModulePath), SHA256 and file set verified."
     return [pscustomobject]@{
         Path = $candidate
         Policy = $policy
@@ -876,6 +871,26 @@ function Ensure-GomobileTools([string] $goBinary, [string] $binDir) {
 
 }
 
+function Get-OfficialTagCommit([string] $gitBinary, [string] $targetTag) {
+    $refs = Get-ExternalOutput -FilePath $gitBinary -Arguments @(
+        'ls-remote', '--tags', $officialRemote, "refs/tags/$targetTag", "refs/tags/$targetTag^{}"
+    ) -FailureMessage "Failed to query official tag $targetTag"
+    $directCommit = $null
+    $peeledCommit = $null
+    foreach ($line in ($refs -split "`r?`n")) {
+        if ($line -match '^([0-9a-f]{40})\s+refs/tags/(.+)$') {
+            if ($matches[2] -ceq $targetTag) {
+                $directCommit = $matches[1]
+            } elseif ($matches[2] -ceq "$targetTag^{}") {
+                $peeledCommit = $matches[1]
+            }
+        }
+    }
+    if ($peeledCommit) { return $peeledCommit }
+    if ($directCommit) { return $directCommit }
+    Fail "Official tag $targetTag was not found"
+}
+
 function Resolve-UpstreamCloneSource([string] $gitBinary) {
     if ([string]::IsNullOrWhiteSpace($SourceRepository)) {
         return [pscustomobject]@{ Path = $officialRemote; IsLocal = $false }
@@ -898,18 +913,14 @@ function Resolve-UpstreamCloneSource([string] $gitBinary) {
         Fail "Local upstream source origin is not the official repository: $remoteUrl"
     }
 
-    $expectedCommit = $trustedTagCommits[$resolvedTag]
-    if ([string]::IsNullOrWhiteSpace($expectedCommit)) {
-        Fail "Local upstream source is not allowed for unpinned tag: $resolvedTag"
-    }
     $actualCommit = (Get-ExternalOutput -FilePath $gitBinary -Arguments @(
             'rev-list', '-n', '1', "refs/tags/$resolvedTag"
         ) -WorkingDirectory $sourcePath -FailureMessage "Local upstream source does not contain tag $resolvedTag").Trim()
-    if ($actualCommit -cne $expectedCommit) {
-        Fail "Local upstream tag $resolvedTag points to $actualCommit, expected $expectedCommit"
+    if ($actualCommit -cne $officialCommit) {
+        Fail "Local upstream tag $resolvedTag points to $actualCommit, official remote points to $officialCommit"
     }
 
-    Write-Host "Using pinned local official git source: $sourcePath ($resolvedTag@$actualCommit)"
+    Write-Host "Using verified local official git source: $sourcePath ($resolvedTag@$actualCommit)"
     return [pscustomobject]@{ Path = $sourcePath; IsLocal = $true }
 }
 
@@ -946,16 +957,12 @@ function Prepare-UpstreamTree([string] $gitBinary) {
         Fail "Expected official tag $resolvedTag but cloned $checkedOutTag"
     }
 
-    $expectedCommit = $trustedTagCommits[$resolvedTag]
-    if ([string]::IsNullOrWhiteSpace($expectedCommit)) {
-        Fail "Official tag is not pinned to a trusted commit: $resolvedTag"
-    }
     $checkedOutCommit = (Get-ExternalOutput -FilePath $gitBinary -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $upstreamDir -FailureMessage 'Failed to read checked out sing-box commit').Trim()
     $checkedOutTagCommit = (Get-ExternalOutput -FilePath $gitBinary -Arguments @('rev-list', '-n', '1', "refs/tags/$resolvedTag") -WorkingDirectory $upstreamDir -FailureMessage "Failed to resolve cloned tag $resolvedTag").Trim()
-    if ($checkedOutCommit -cne $expectedCommit -or $checkedOutTagCommit -cne $expectedCommit) {
-        Fail "Official tag/HEAD commit mismatch for ${resolvedTag}: HEAD=$checkedOutCommit, tag=$checkedOutTagCommit, expected=$expectedCommit"
+    if ($checkedOutCommit -cne $officialCommit -or $checkedOutTagCommit -cne $officialCommit) {
+        Fail "Official tag/HEAD commit mismatch for ${resolvedTag}: HEAD=$checkedOutCommit, tag=$checkedOutTagCommit, remote=$officialCommit"
     }
-    Write-Host "Upstream commit policy: $resolvedTag@$expectedCommit verified."
+    Write-Host "Upstream commit policy: $resolvedTag@$officialCommit verified against official remote."
 
     Assert-UpstreamTreeIsClean -gitBinary $gitBinary
 }
@@ -1002,7 +1009,7 @@ function Assert-LiteralOccurrence(
 }
 
 function Assert-NoUnbudgetedPhysicalDialSites {
-    if (-not $requiredKunBoxNativeMarkers.ContainsKey($resolvedTag)) {
+    if (-not $requiredKunBoxNativeMarkers.ContainsKey($patchPolicyTag)) {
         return
     }
     Assert-LiteralOccurrence 'common/dialer/default.go' 'dialPhysicalConn(ctx' 1
@@ -1011,14 +1018,17 @@ function Assert-NoUnbudgetedPhysicalDialSites {
     Assert-LiteralOccurrence 'common/dialer/default_parallel_interface.go' 'listenPhysicalPacket(ctx' 2
     Assert-LiteralOccurrence 'protocol/direct/outbound.go' 'dialer.AcquirePhysicalDial(ctx)' 1
     Assert-LiteralOccurrence 'protocol/direct/outbound.go' 'ping.ConnectDestination(' 1
-    if ($resolvedTag -eq 'v1.14.0') {
+    $usesPingConnector = [System.IO.File]::ReadAllText(
+        (Join-Path $upstreamDir 'protocol/direct/outbound.go')
+    ).Contains('ping.NewPortWithDestinationConnector(', [System.StringComparison]::Ordinal)
+    if ($usesPingConnector) {
         Assert-LiteralOccurrence 'protocol/direct/outbound.go' 'ping.NewPortWithDestinationConnector(' 1
         Assert-LiteralOccurrence 'experimental/libbox/native_shell_session.go' `
             '//go:build with_tailscale && (linux || android || darwin || ios)' 1
         Assert-LiteralOccurrence 'experimental/libbox/native_shell_session_stub.go' `
             '//go:build !with_tailscale || (!linux && !android && !darwin && !ios)' 1
     }
-    $wireGuardBindNeedle = if ($resolvedTag -eq 'v1.14.0') {
+    $wireGuardBindNeedle = if ($usesPingConnector) {
         'newBudgetedWireGuardBind(standardBind)'
     } else {
         'newBudgetedWireGuardBind(conn.NewStdNetBind(wgListener.WireGuardControl()))'
@@ -1032,7 +1042,7 @@ function Assert-NoUnbudgetedPhysicalDialSites {
 
     $directPath = Join-Path $upstreamDir 'protocol/direct/outbound.go'
     $directText = [System.IO.File]::ReadAllText($directPath)
-    $helperName = if ($resolvedTag -eq 'v1.14.0') {
+    $helperName = if ($usesPingConnector) {
         'func acquireBudgetedPingDestination'
     } else {
         'func acquireBudgetedDirectRouteDestination('
@@ -1067,8 +1077,15 @@ function Apply-DependencyPatch([string] $goBinary, [string] $gitBinary) {
     }
     $actualVersion = $moduleInfo.Substring(0, $separatorIndex)
     $sourceDir = $moduleInfo.Substring($separatorIndex + 1)
-    if ($actualVersion -cne $policy.Version) {
-        Fail "Dependency version mismatch for $($policy.ModulePath): $actualVersion, expected $($policy.Version)"
+    $moduleDeclaration = Get-Content -LiteralPath (Join-Path $upstreamDir 'go.mod') -Encoding UTF8 |
+        Where-Object { $_ -match ('^\s*' + [regex]::Escape($policy.ModulePath) + '\s+([^\s]+)') } |
+        Select-Object -First 1
+    if (-not $moduleDeclaration -or $moduleDeclaration -notmatch ('^\s*' + [regex]::Escape($policy.ModulePath) + '\s+([^\s]+)')) {
+        Fail "Dependency declaration missing from official go.mod: $($policy.ModulePath)"
+    }
+    $declaredVersion = $matches[1]
+    if ($actualVersion -cne $declaredVersion) {
+        Fail "Dependency version mismatch for $($policy.ModulePath): go list=$actualVersion, go.mod=$declaredVersion"
     }
     if (-not (Test-Path -LiteralPath $sourceDir)) {
         Fail "Dependency source directory not found: $sourceDir"
@@ -1353,7 +1370,7 @@ function Assert-AarNativeBinaryPolicy {
     } else {
         $null
     }
-    $requiredKunBoxNativeMarkersForTag = [string[]] @($requiredKunBoxNativeMarkers[$resolvedTag])
+    $requiredKunBoxNativeMarkersForTag = [string[]] @($requiredKunBoxNativeMarkers[$patchPolicyTag])
     if ($null -ne $dependencyPatch -and [string]::IsNullOrWhiteSpace($requiredNativeMarker)) {
         Fail 'Dependency patch policy is missing its required native marker.'
     }
@@ -1646,7 +1663,7 @@ if ($SelfTestBinaryScan) {
     Invoke-BinaryPatternScannerSelfTest
     foreach ($targetTag in @($trustedPatchHashes.Keys)) {
         $selfTestPatch = Resolve-PatchFile -targetTag $targetTag
-        Assert-MinimalLibboxPatch -PatchPath $selfTestPatch -TargetTag $targetTag
+        Assert-MinimalLibboxPatch -PatchPath $selfTestPatch.Path -TargetTag $selfTestPatch.PolicyTag
         [void] (Resolve-DependencyPatch -targetTag $targetTag)
     }
     exit 0
@@ -1699,9 +1716,12 @@ try {
     Remove-WorkspaceGarbage
 
     $resolvedTag = Resolve-TargetTag
-    $patchFile = Resolve-PatchFile -targetTag $resolvedTag
-    Assert-MinimalLibboxPatch -PatchPath $patchFile -TargetTag $resolvedTag
-    $dependencyPatch = Resolve-DependencyPatch -targetTag $resolvedTag
+    $officialCommit = Get-OfficialTagCommit -gitBinary $gitPath -targetTag $resolvedTag
+    $patchChoice = Resolve-PatchFile -targetTag $resolvedTag
+    $patchFile = $patchChoice.Path
+    $patchPolicyTag = $patchChoice.PolicyTag
+    Assert-MinimalLibboxPatch -PatchPath $patchFile -TargetTag $patchPolicyTag
+    $dependencyPatch = Resolve-DependencyPatch -targetTag $patchPolicyTag
     Write-Host ("Patch file: {0}" -f $patchFile)
 
     Ensure-GomobileTools -goBinary $goPath -binDir $gopathBin
