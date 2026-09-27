@@ -87,6 +87,8 @@ class RootTransparentForegroundService : Service() {
             internal set
         @Volatile var isStarting: Boolean = false
             internal set
+        @Volatile var isStopping: Boolean = false
+            internal set
     }
 
     internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -123,6 +125,7 @@ class RootTransparentForegroundService : Service() {
     override fun onCreate() {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         super.onCreate()
+        isStopping = false
         Log.i(
             TAG,
             "[ROOT_BOOT] stage=foreground_create_begin pid=${android.os.Process.myPid()} " +
@@ -575,19 +578,20 @@ class RootTransparentForegroundService : Service() {
             if (stopped != null) {
                 lastRootSnapshot = stopped
             } else if (runtimeSessionId.isNotBlank()) {
-                lastRootSnapshot = RootRuntimeSnapshot(
+                lastRootSnapshot = lastRootSnapshot.copy(
                     phase = RootRuntimePhase.FAILED_VERIFICATION,
                     runtimeSessionId = runtimeSessionId,
-                    rulesInstalled = false,
                     error = "Root startup cleanup could not be confirmed"
                 )
             }
+            ensureRunningRequest(token)
             val cleanupFailed = lastRootSnapshot.phase == RootRuntimePhase.FAILED_BLOCKED ||
                 lastRootSnapshot.rulesInstalled
+            val cleanupPending = rootFailureRequiresCleanup(lastRootSnapshot)
             transitionLifecycle(token, RootLifecycleState.FAILED, "start_failed")
             VpnStateStore.setActive(false)
-            VpnStateStore.setPending("")
-            if (cleanupFailed) {
+            VpnStateStore.setPending(if (cleanupPending) "stopping" else "")
+            if (cleanupPending) {
                 VpnStateStore.setStopOwnerMode(VpnStateStore.CoreMode.ROOT)
                 VpnStateStore.setMode(VpnStateStore.CoreMode.ROOT)
             } else {
@@ -595,14 +599,14 @@ class RootTransparentForegroundService : Service() {
                 VpnStateStore.setMode(VpnStateStore.CoreMode.NONE)
             }
             SingBoxIpcHub.update(
-                state = ServiceState.STOPPED,
+                state = if (cleanupPending) ServiceState.STOPPING else ServiceState.STOPPED,
                 lastError = error.message ?: "Root transparent startup failed",
                 readiness = rootReadiness(
                     if (cleanupFailed) DataPlaneStatus.FAILED_BLOCKED else DataPlaneStatus.FAILED_UNPROTECTED,
                     if (cleanupFailed) "root_rules_present" else "root_start_failed"
                 )
             )
-            if (cleanupFailed) {
+            if (cleanupPending) {
                 updateNotification()
             } else {
                 runtimeSessionId = ""
@@ -785,6 +789,8 @@ class RootTransparentForegroundService : Service() {
         val state = lifecycle.snapshot().state
         isRunning = state == RootLifecycleState.RUNNING
         isStarting = state == RootLifecycleState.STARTING || state == RootLifecycleState.RELOADING
+        isStopping = state == RootLifecycleState.STOPPING ||
+            (state == RootLifecycleState.FAILED && rootFailureRequiresCleanup(lastRootSnapshot))
     }
 
     internal fun logLifecycle(

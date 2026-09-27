@@ -158,10 +158,13 @@ data class RootRuntimeSnapshot(
         private const val KEY_STARTUP_TIMINGS = "startup_timings"
 
         fun fromBundle(bundle: Bundle?): RootRuntimeSnapshot {
-            if (bundle == null) return RootRuntimeSnapshot()
+            if (bundle == null) return RootRuntimeSnapshot(
+                phase = RootRuntimePhase.FAILED_VERIFICATION,
+                error = "Root runtime snapshot is missing"
+            )
             val rawPhase = runCatching {
                 RootRuntimePhase.valueOf(bundle.getString(KEY_PHASE).orEmpty())
-            }.getOrDefault(RootRuntimePhase.FAILED_UNPROTECTED)
+            }.getOrDefault(RootRuntimePhase.FAILED_VERIFICATION)
             return RootRuntimeSnapshot(
                 phase = if (rawPhase == RootRuntimePhase.FAILED_RULES_PRESENT) {
                     RootRuntimePhase.FAILED_BLOCKED
@@ -211,6 +214,26 @@ internal fun rootStartFailureRequiresSynchronousStop(snapshot: RootRuntimeSnapsh
         RootRuntimePhase.FAILED_BLOCKED
     )
 }
+
+// A missing verification result is not evidence that capture rules have been removed.
+internal fun rootFailureRequiresCleanup(snapshot: RootRuntimeSnapshot): Boolean =
+    snapshot.rulesInstalled || snapshot.phase in setOf(
+        RootRuntimePhase.ROOT_BINDING,
+        RootRuntimePhase.VALIDATING_PLAN,
+        RootRuntimePhase.UID_SNAPSHOT_1,
+        RootRuntimePhase.FAIL_CLOSED,
+        RootRuntimePhase.CORE_STARTING,
+        RootRuntimePhase.CORE_VERIFYING,
+        RootRuntimePhase.RULES_STAGING,
+        RootRuntimePhase.UID_SNAPSHOT_2,
+        RootRuntimePhase.RULES_ACTIVATING,
+        RootRuntimePhase.RUNNING,
+        RootRuntimePhase.CLEANING,
+        RootRuntimePhase.ROLLBACK,
+        RootRuntimePhase.FAILED_VERIFICATION,
+        RootRuntimePhase.FAILED_BLOCKED,
+        RootRuntimePhase.FAILED_RULES_PRESENT
+    )
 
 internal fun rootDestroyRequiresCleanup(snapshot: RootRuntimeSnapshot, activeTransactions: Int): Boolean =
     activeTransactions == 0 && snapshot.phase !in setOf(

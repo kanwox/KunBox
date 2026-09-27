@@ -707,6 +707,7 @@ internal suspend fun ConfigRepository.generateConfigFile(
         } else {
             null
         }
+        val rootBindings = rootRoutingPlan?.let(ConfigRepository::buildRootLaneRuntimeBindings)
         val inbounds = buildRunInbounds(sanitizedSettings, rootRoutingPlan)
         val endpoints = buildRunEndpoints(
             baseConfig = config,
@@ -721,7 +722,8 @@ internal suspend fun ConfigRepository.generateConfigFile(
             outboundsContext,
             dnsOverrideConfig,
             config.dns,
-            rootRoutingPlan
+            rootRoutingPlan,
+            rootBindings
         )
         val route = buildRunRoute(
             sanitizedSettings,
@@ -729,7 +731,8 @@ internal suspend fun ConfigRepository.generateConfigFile(
             outboundsContext.outbounds,
             outboundsContext.ruleNodeTagResolver,
             customRuleSets,
-            rootRoutingPlan
+            rootRoutingPlan,
+            rootBindings
         )
         val runtimeOutbounds = ConfigRepository.pruneUnreachableGroupOutbounds(
             outbounds = outboundsContext.outbounds,
@@ -791,7 +794,9 @@ internal suspend fun ConfigRepository.generateConfigFile(
             availableTags = runtimeOutbounds.mapTo(mutableSetOf(), Outbound::tag) +
                 endpoints.orEmpty().map(Endpoint::tag)
         )
-        rootRoutingPlan?.let { ConfigRepository.requireValidRootApplicationRoutes(runConfig, it) }
+        rootRoutingPlan?.let {
+            ConfigRepository.requireValidRootApplicationRoutes(runConfig, it, requireNotNull(rootBindings))
+        }
 
         recordStage("build_routes_dns")
         val validation = singBoxCore.validateConfig(stripInternalMetadata(runConfig))

@@ -210,17 +210,25 @@ internal suspend fun RootTransparentForegroundService.restoreReloadedPreviousRun
 }
 
 internal fun RootTransparentForegroundService.publishReloadFailure(snapshot: RootRuntimeSnapshot, reason: String, token: Long) {
+    lastRootSnapshot = snapshot
     if (snapshot.phase == RootRuntimePhase.FAILED_BLOCKED) {
         transitionLifecycle(token, RootLifecycleState.FAILED, "reload_rules_present")
         publishUidRefreshBlocked(snapshot.copy(error = snapshot.error.ifBlank { reason }), token)
         return
     }
     transitionLifecycle(token, RootLifecycleState.FAILED, "reload_failed")
+    val cleanupPending = rootFailureRequiresCleanup(snapshot)
     VpnStateStore.setActive(false)
-    VpnStateStore.setPending("")
-    VpnStateStore.setMode(VpnStateStore.CoreMode.NONE)
+    VpnStateStore.setPending(if (cleanupPending) "stopping" else "")
+    if (cleanupPending) {
+        VpnStateStore.setStopOwnerMode(VpnStateStore.CoreMode.ROOT)
+        VpnStateStore.setMode(VpnStateStore.CoreMode.ROOT)
+    } else {
+        VpnStateStore.clearStopOwnerMode()
+        VpnStateStore.setMode(VpnStateStore.CoreMode.NONE)
+    }
     SingBoxIpcHub.update(
-        state = ServiceState.STOPPED,
+        state = if (cleanupPending) ServiceState.STOPPING else ServiceState.STOPPED,
         lastError = reason,
         readiness = rootReadiness(
             DataPlaneStatus.FAILED_UNPROTECTED,
@@ -347,12 +355,13 @@ internal fun RootTransparentForegroundService.publishUidRefreshBlocked(snapshot:
     lastRootSnapshot = snapshot
     transitionLifecycle(token, RootLifecycleState.FAILED, "uid_refresh_blocked")
     VpnStateStore.setMode(VpnStateStore.CoreMode.ROOT)
+    VpnStateStore.setStopOwnerMode(VpnStateStore.CoreMode.ROOT)
     VpnStateStore.setActive(false)
-    VpnStateStore.setPending("")
+    VpnStateStore.setPending("stopping")
     VpnTileService.persistVpnState(false)
     NetworkClient.onVpnStateChanged(false)
     SingBoxIpcHub.update(
-        state = ServiceState.STOPPED,
+        state = ServiceState.STOPPING,
         lastError = snapshot.error.ifBlank { "Root UID refresh is blocked" },
         readiness = rootReadiness(DataPlaneStatus.FAILED_BLOCKED, "root_uid_refresh_blocked")
     )
