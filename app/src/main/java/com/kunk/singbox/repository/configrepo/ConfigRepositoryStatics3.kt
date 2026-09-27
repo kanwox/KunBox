@@ -1,4 +1,4 @@
-@file:Suppress("UnusedImports", "TooManyFunctions", "LongMethod", "LargeClass", "Indentation", "InvalidPackageDeclaration", "MaxLineLength", "LoopWithTooManyJumpStatements", "CognitiveComplexMethod", "ComplexCondition", "CyclomaticComplexMethod", "EmptyCatchBlock", "NestedBlockDepth", "ReturnCount", "SwallowedException", "TooGenericExceptionThrown", "UnusedParameter", "UnusedPrivateProperty", "VariableNaming", "NoUnusedImports", "MayBeCons")
+@file:Suppress("UnusedImports", "TooManyFunctions", "LongMethod", "LargeClass", "Indentation", "InvalidPackageDeclaration", "MaxLineLength", "LoopWithTooManyJumpStatements", "CognitiveComplexMethod", "ComplexCondition", "CyclomaticComplexMethod", "EmptyCatchBlock", "NestedBlockDepth", "ReturnCount", "SwallowedException", "TooGenericExceptionThrown", "UnusedParameter", "UnusedPrivateProperty", "VariableNaming", "NoUnusedImports", "MayBeCons", "MatchingDeclarationName")
 
 package com.kunk.singbox.repository
 
@@ -10,32 +10,121 @@ import com.kunk.singbox.repository.config.InboundBuilder
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
+internal data class RootLaneRuntimeBinding(
+    val lane: RootAppRouteLane,
+    val inboundTags: List<String>,
+    val routeRule: RouteRule,
+    val dnsRule: DnsRule,
+    val dnsServerTag: String?
+)
+
+internal fun ConfigRepository.Companion.buildRootLaneRuntimeBindings(
+    plan: RootAppRoutingPlan
+): List<RootLaneRuntimeBinding> = plan.lanes.sortedBy(RootAppRouteLane::slot).map { lane ->
+    require(lane.targetKind in setOf("DIRECT", "OUTBOUND", "BLOCK")) {
+        "Invalid Root lane target: ${lane.laneId}"
+    }
+    val inboundTags = lane.inboundTags(plan.proxyIpv4, plan.proxyIpv6)
+    val routeRule = if (lane.targetKind == "BLOCK") {
+        RouteRule(inbound = inboundTags, action = "reject")
+    } else {
+        RouteRule(inbound = inboundTags, action = "route", outbound = lane.outboundTag)
+    }
+    val dnsServerTag = when (lane.targetKind) {
+        "DIRECT" -> "local"
+        "OUTBOUND" -> ConfigRepository.buildDynamicDnsServerTag(lane.outboundTag)
+        else -> null
+    }
+    val dnsRule = if (lane.targetKind == "BLOCK") {
+        DnsRule(inbound = inboundTags, action = "predefined", rcode = JsonPrimitive("NOERROR"))
+    } else {
+        DnsRule(
+            inbound = inboundTags,
+            action = "route",
+            server = dnsServerTag,
+            queryType = IP_DNS_QUERY_TYPES.takeIf {
+                plan.fakeDnsEnabled && lane.targetKind == "OUTBOUND"
+            }
+        )
+    }
+    RootLaneRuntimeBinding(lane, inboundTags, routeRule, dnsRule, dnsServerTag)
+}
+
 internal fun ConfigRepository.Companion.requireValidRootApplicationRoutes(
     config: SingBoxConfig,
-    plan: RootAppRoutingPlan
+    plan: RootAppRoutingPlan,
+    bindings: List<RootLaneRuntimeBinding>? = null
 ) {
+    val effectivePlan = if (plan.schema == 1) {
+        // Legacy snapshots lack the explicit flag; infer only from the hash-verified DNS configuration.
+        plan.copy(fakeDnsEnabled = config.dns?.fakeip?.enabled == true || config.dns?.servers.orEmpty().any {
+            it.tag == "fakeip-dns" && it.type == "fakeip"
+        })
+    } else {
+        plan
+    }
+    val runtimeBindings = bindings ?: buildRootLaneRuntimeBindings(effectivePlan)
+    require(runtimeBindings.map { it.lane } == plan.lanes.sortedBy(RootAppRouteLane::slot)) {
+        "Root binding snapshot mismatch: generation=${plan.generation}"
+    }
     val inboundTags = config.inbounds.orEmpty().mapNotNullTo(mutableSetOf(), Inbound::tag)
     val outboundTags = config.outbounds.orEmpty().mapTo(mutableSetOf(), Outbound::tag) +
         config.endpoints.orEmpty().map(Endpoint::tag)
     val dnsServerTags = config.dns?.servers.orEmpty().mapNotNullTo(mutableSetOf(), DnsServer::tag)
     val routeRules = config.route?.rules.orEmpty()
     val dnsRules = config.dns?.rules.orEmpty()
+    require(config.inbounds.orEmpty().mapNotNull(Inbound::tag).size == inboundTags.size) {
+        "Root inbound tag is duplicated"
+    }
+    require(config.dns?.servers.orEmpty().mapNotNull(DnsServer::tag).size == dnsServerTags.size) {
+        "Root DNS server tag is duplicated"
+    }
     require(routeRules.none { !it.packageName.isNullOrEmpty() }) {
         "Root 运行配置仍含 package_name 路由，已阻止不确定应用分流"
     }
     require(dnsRules.none { !it.packageName.isNullOrEmpty() }) {
         "Root 运行配置仍含 package_name DNS 规则，已阻止不确定应用分流"
     }
-    plan.lanes.forEach { lane ->
-        val laneInbounds = lane.inboundTags(plan.proxyIpv4, plan.proxyIpv6)
-        requireValidRootLaneRoute(lane, laneInbounds, inboundTags, outboundTags, routeRules)
+    runtimeBindings.forEach { binding ->
+        // Check the compiled binding against plan semantics independently of the emitter.
+        val lane = binding.lane
+        require(binding.inboundTags == lane.inboundTags(plan.proxyIpv4, plan.proxyIpv6)) {
+            "Root lane ${lane.laneId} binding inbound mismatch"
+        }
+        require(binding.routeRule.outbound == lane.outboundTag.takeUnless { lane.targetKind == "BLOCK" }) {
+            "Root lane ${lane.laneId} binding outbound mismatch"
+        }
+        val blocked = lane.targetKind == "BLOCK"
+        require(binding.routeRule.action == if (blocked) "reject" else "route") {
+            "Root lane ${lane.laneId} binding route action mismatch"
+        }
+        require(binding.dnsRule.action == if (blocked) "predefined" else "route") {
+            "Root lane ${lane.laneId} binding DNS action mismatch"
+        }
+        val expectedServer = when (lane.targetKind) {
+            "DIRECT" -> "local"
+            "OUTBOUND" -> buildDynamicDnsServerTag(lane.outboundTag)
+            else -> null
+        }
+        require(binding.dnsServerTag == expectedServer && binding.dnsRule.server == expectedServer) {
+            "Root lane ${lane.laneId} binding DNS server mismatch"
+        }
+        require(binding.dnsRule.queryType == IP_DNS_QUERY_TYPES.takeIf {
+            effectivePlan.fakeDnsEnabled && lane.targetKind == "OUTBOUND"
+        }) { "Root lane ${lane.laneId} binding queryType mismatch" }
+        requireValidRootLaneListeners(config.inbounds.orEmpty(), plan, lane)
+        requireValidRootLaneRoute(binding, inboundTags, outboundTags, routeRules)
         requireValidRootLaneDns(
-            lane,
-            laneInbounds,
+            binding,
             dnsServerTags,
-            dnsRules,
-            config.dns?.fakeip != null
+            dnsRules
         )
+        if (lane.targetKind == "OUTBOUND") {
+            val server = config.dns?.servers.orEmpty().single { it.tag == expectedServer }
+            require(server.detour == lane.outboundTag) {
+                "Root lane ${lane.laneId} DNS detour mismatch: expected=${lane.outboundTag}, actual=${server.detour}"
+            }
+        }
     }
     require(plan.staticPlanSha256 == RootAppRoutingCanonical.staticPlanSha256(plan)) {
         "Root static plan digest mismatch"
@@ -45,23 +134,51 @@ internal fun ConfigRepository.Companion.requireValidRootApplicationRoutes(
     }
 }
 
+private fun requireValidRootLaneListeners(
+    inbounds: List<Inbound>,
+    plan: RootAppRoutingPlan,
+    lane: RootAppRouteLane
+) {
+    val expected = buildList {
+        if (plan.proxyIpv4) {
+            add(Triple(lane.tcpInboundIpv4, lane.tcpPortIpv4, "redirect"))
+            add(Triple(lane.udpInboundIpv4, lane.udpPortIpv4, "tproxy"))
+        }
+        if (plan.proxyIpv6) {
+            add(Triple(lane.tcpInboundIpv6, lane.tcpPortIpv6, "redirect"))
+            add(Triple(lane.udpInboundIpv6, lane.udpPortIpv6, "tproxy"))
+        }
+    }
+    val enabledTags = expected.map { it.first }.toSet()
+    val disabledTags = lane.inboundTags(true, true).filterNot(enabledTags::contains)
+    require(inbounds.none { it.tag in disabledTags }) { "Root lane ${lane.laneId} disabled IP family listener" }
+    expected.forEach { (tag, port, type) ->
+        val actual = inbounds.singleOrNull { it.tag == tag }
+        require(actual?.listenPort == port && actual.type == type &&
+            actual.listen == (if (tag.endsWith("-v6")) "::" else "0.0.0.0") &&
+            (type != "tproxy" || actual.network == "udp")) {
+            "Root lane ${lane.laneId} listener mismatch: tag=$tag expected=$type:$port " +
+                "actual=${actual?.type}:${actual?.listenPort} network=${actual?.network}"
+        }
+    }
+}
+
 internal fun ConfigRepository.Companion.requireValidRootLaneRoute(
-    lane: RootAppRouteLane,
-    laneInbounds: List<String>,
+    binding: RootLaneRuntimeBinding,
     inboundTags: Set<String>,
     outboundTags: Set<String>,
     routeRules: List<RouteRule>
 ) {
-    require(laneInbounds.isNotEmpty() && laneInbounds.all(inboundTags::contains)) {
-        "Root lane ${lane.laneId} 缺少 inbound"
+    val lane = binding.lane
+    require(binding.inboundTags.isNotEmpty() && binding.inboundTags.all(inboundTags::contains)) {
+        "Root lane ${lane.laneId} 缺少 inbound: expected=${binding.inboundTags}"
     }
-    val expected = if (lane.targetKind == "BLOCK") {
-        RouteRule(inbound = laneInbounds, action = "reject")
-    } else {
-        RouteRule(inbound = laneInbounds, action = "route", outbound = lane.outboundTag)
-    }
-    require(routeRules.count(expected::equals) == 1) {
-        "Root lane ${lane.laneId} 缺少唯一且完整的 TCP/UDP 路由规则"
+    val matchCount = routeRules.count(binding.routeRule::equals)
+    require(matchCount == 1) {
+        val reason = if (matchCount == 0) "缺少" else "重复"
+        "Root lane ${lane.laneId} ${reason}唯一且完整的 TCP/UDP 路由规则: " +
+            "expected=${binding.routeRule}, matches=$matchCount, actual=" +
+            routeRules.filter { it.inbound.orEmpty().any(binding.inboundTags::contains) }.take(3)
     }
     if (lane.targetKind != "BLOCK") {
         require(lane.outboundTag == "direct" || lane.outboundTag in outboundTags) {
@@ -71,33 +188,21 @@ internal fun ConfigRepository.Companion.requireValidRootLaneRoute(
 }
 
 internal fun ConfigRepository.Companion.requireValidRootLaneDns(
-    lane: RootAppRouteLane,
-    laneInbounds: List<String>,
+    binding: RootLaneRuntimeBinding,
     dnsServerTags: Set<String>,
-    dnsRules: List<DnsRule>,
-    fakeDnsEnabled: Boolean
+    dnsRules: List<DnsRule>
 ) {
-    val expectedDnsServer = when (lane.targetKind) {
-        "DIRECT" -> "local"
-        "OUTBOUND" -> buildDynamicDnsServerTag(lane.outboundTag)
-        else -> null
+    val lane = binding.lane
+    val matchCount = dnsRules.count(binding.dnsRule::equals)
+    require(matchCount == 1) {
+        val reason = if (matchCount == 0) "缺少" else "重复"
+        "Root lane ${lane.laneId} ${reason}唯一且完整的 DNS 规则: " +
+            "expected=${binding.dnsRule}, matches=$matchCount, actual=" +
+            dnsRules.filter { it.inbound.orEmpty().any(binding.inboundTags::contains) }.take(3)
     }
-    val expected = if (lane.targetKind == "BLOCK") {
-        DnsRule(inbound = laneInbounds, action = "predefined", rcode = JsonPrimitive("NOERROR"))
-    } else {
-        DnsRule(
-            inbound = laneInbounds,
-            action = "route",
-            server = expectedDnsServer,
-            queryType = IP_DNS_QUERY_TYPES.takeIf { fakeDnsEnabled && lane.targetKind == "OUTBOUND" }
-        )
-    }
-    require(dnsRules.count(expected::equals) == 1) {
-        "Root lane ${lane.laneId} 缺少唯一且完整的 DNS 规则"
-    }
-    if (expectedDnsServer != null) {
+    binding.dnsServerTag?.let { expectedDnsServer ->
         require(expectedDnsServer in dnsServerTags) {
-            "Root lane ${lane.laneId} DNS server 不存在"
+            "Root lane ${lane.laneId} DNS server 不存在: tag=$expectedDnsServer"
         }
     }
 }

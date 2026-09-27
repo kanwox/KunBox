@@ -93,13 +93,19 @@ internal fun ConfigRepository.buildRunDns(
     outboundsContext: ConfigRepositoryRunOutboundsContext,
     dnsOverride: DnsConfig? = null,
     originalDns: DnsConfig? = null,
-    rootRoutingPlan: RootAppRoutingPlan? = null
+    rootRoutingPlan: RootAppRoutingPlan? = null,
+    rootBindings: List<RootLaneRuntimeBinding>? = rootRoutingPlan?.let(ConfigRepository::buildRootLaneRuntimeBindings)
 ): DnsConfig {
     val dnsServers = mutableListOf<DnsServer>()
     val dnsRules = mutableListOf<DnsRule>()
     val customDomainDnsRules = mutableListOf<DnsRule>()
     val appDnsRules = mutableListOf<DnsRule>()
     val ruleSetDnsRules = mutableListOf<DnsRule>()
+    val rootProtectedInboundTags = rootRoutingPlan?.let {
+        // Include the namespace even when this generation contains no application lanes.
+        rootBindings.orEmpty().flatMap(RootLaneRuntimeBinding::inboundTags).toSet() + "root-lane-"
+    }.orEmpty()
+    ConfigRepository.requireNoRootDnsInboundOverrides(originalDns?.rules.orEmpty(), rootProtectedInboundTags)
 
     val profiles = _profiles.value
     val proxyDetourTag = outboundsContext.selectorTag
@@ -308,11 +314,10 @@ internal fun ConfigRepository.buildRunDns(
     }
 
     if (rootRoutingPlan != null) {
-        rootRoutingPlan.lanes.sortedBy(RootAppRouteLane::slot).forEach { lane ->
-            addPackageDnsRule(
-                DnsRule(inbound = lane.inboundTags(rootRoutingPlan.proxyIpv4, rootRoutingPlan.proxyIpv6)),
-                ConfigRepository.rootLaneSemantic(lane)
-            )
+        require(rootRoutingPlan.fakeDnsEnabled == settings.fakeDnsEnabled) { "Root Fake DNS snapshot mismatch" }
+        requireNotNull(rootBindings).forEach { binding ->
+            appDnsRules.add(binding.dnsRule)
+            packageSemantics.add(ConfigRepository.rootLaneSemantic(binding.lane))
         }
     } else {
         settings.appRules
@@ -433,6 +438,11 @@ internal fun ConfigRepository.buildRunDns(
         )
     }
 
+    val rootProtectedServerTags = if (rootRoutingPlan != null) {
+        dnsServers.mapNotNull(DnsServer::tag).toSet()
+    } else {
+        emptySet()
+    }
     // 追加订阅原始配置中的 DNS servers 和 rules
     if (originalDns != null) {
         originalDns.servers?.forEach { server ->
@@ -475,7 +485,9 @@ internal fun ConfigRepository.buildRunDns(
                     rule.copy(inbound = ConfigRepository.normalizeRuleSetInboundTags(rule.inbound, settings))
                 }
             ),
-            ::sanitizeDnsServer
+            protectedServerTags = rootProtectedServerTags,
+            protectedInboundTags = rootProtectedInboundTags,
+            sanitizeServer = ::sanitizeDnsServer
         )
     } else {
         baseDnsConfig

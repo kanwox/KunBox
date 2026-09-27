@@ -423,12 +423,17 @@ internal fun ConfigRepository.Companion.sanitizeDnsRulesForRuntime(
 internal fun ConfigRepository.Companion.applyDnsOverride(
     baseConfig: DnsConfig,
     overrideConfig: DnsConfig,
+    protectedServerTags: Set<String> = emptySet(),
+    protectedInboundTags: Set<String> = emptySet(),
     sanitizeServer: (DnsServer) -> DnsServer = { it }
 ): DnsConfig {
     val servers = baseConfig.servers.orEmpty().toMutableList()
     overrideConfig.servers.orEmpty().forEach { server ->
-        val tag = server.tag
+        val tag = server.tag?.trim()
         if (!tag.isNullOrBlank()) {
+            require(tag !in protectedServerTags) {
+                "DNS override cannot replace Root protected server tag: $tag"
+            }
             val sanitizedServer = sanitizeServer(server)
             val existingIndex = servers.indexOfFirst { it.tag == tag }
             if (existingIndex >= 0) {
@@ -445,6 +450,7 @@ internal fun ConfigRepository.Companion.applyDnsOverride(
         overrideConfig.rules.orEmpty(),
         availableServerTags
     )
+    requireNoRootDnsInboundOverrides(overrideConfig.rules.orEmpty(), protectedInboundTags)
     if (overrideRules.isNotEmpty()) {
         rules.addAll(0, overrideRules)
     }
@@ -462,6 +468,20 @@ internal fun ConfigRepository.Companion.applyDnsOverride(
         clientSubnet = overrideConfig.clientSubnet ?: baseConfig.clientSubnet,
         fakeip = overrideConfig.fakeip ?: baseConfig.fakeip
     )
+}
+
+internal fun ConfigRepository.Companion.requireNoRootDnsInboundOverrides(
+    rules: List<DnsRule>,
+    protectedInboundTags: Set<String>
+) {
+    if (protectedInboundTags.isEmpty()) return
+    rules.forEach { rule ->
+        val forbidden = rule.inbound.orEmpty().firstOrNull {
+            it.trim() in protectedInboundTags || it.trim().startsWith("root-lane-")
+        }
+        check(forbidden == null) { "DNS override cannot use Root protected inbound tag: $forbidden" }
+        requireNoRootDnsInboundOverrides(rule.rules.orEmpty(), protectedInboundTags)
+    }
 }
 
 internal fun ConfigRepository.Companion.normalizeDnsOverrideRule(rule: DnsRule): DnsRule {

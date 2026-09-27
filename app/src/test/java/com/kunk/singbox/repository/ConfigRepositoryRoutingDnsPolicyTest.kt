@@ -22,8 +22,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
+@Suppress("LargeClass")
 class ConfigRepositoryRoutingDnsPolicyTest {
 
     @Test
@@ -58,7 +60,9 @@ class ConfigRepositoryRoutingDnsPolicyTest {
                 rules = listOf(RouteRule(inbound = laneInbounds, action = "route", outbound = lane.outboundTag))
             ),
             dns = DnsConfig(
-                servers = listOf(DnsServer(type = "udp", tag = dnsTag, server = "1.1.1.1")),
+                servers = listOf(
+                    DnsServer(type = "udp", tag = dnsTag, server = "1.1.1.1", detour = lane.outboundTag)
+                ),
                 rules = listOf(DnsRule(inbound = laneInbounds, action = "route", server = dnsTag))
             )
         )
@@ -136,6 +140,78 @@ class ConfigRepositoryRoutingDnsPolicyTest {
         )
 
         assertEquals(listOf("A", "AAAA"), rules.single().queryType)
+    }
+
+    @Test
+    fun rootLaneValidationUsesPlanFakeDnsStateAfterRuntimeFakeIpCleanup() {
+        val settings = AppSettings(
+            trafficCaptureMode = TrafficCaptureMode.ROOT_TRANSPARENT,
+            routingMode = RoutingMode.RULE,
+            fakeDnsEnabled = true
+        )
+        val plan = RootAppRoutingPlanCompiler.compile(
+            settings = settings,
+            assignments = listOf(
+                RootAppRoutingAssignment(
+                    packageNames = listOf("org.telegram.messenger"),
+                    targetKind = "OUTBOUND",
+                    outboundTag = "proxy-node",
+                    sourceLabel = "Telegram"
+                )
+            ),
+            generation = 2L
+        )
+        val lane = plan.lanes.single()
+        val laneInbounds = lane.inboundTags(plan.proxyIpv4, plan.proxyIpv6)
+        val dnsTag = ConfigRepository.buildDynamicDnsServerTag(lane.outboundTag)
+        val config = SingBoxConfig(
+            inbounds = InboundBuilder.build(settings, TunStack.SYSTEM, plan),
+            outbounds = listOf(
+                Outbound(type = "socks", tag = lane.outboundTag),
+                Outbound(type = "direct", tag = "direct")
+            ),
+            route = com.kunk.singbox.model.RouteConfig(
+                rules = listOf(RouteRule(inbound = laneInbounds, action = "route", outbound = lane.outboundTag))
+            ),
+            dns = DnsConfig(
+                servers = listOf(
+                    DnsServer(type = "udp", tag = dnsTag, server = "1.1.1.1", detour = lane.outboundTag)
+                ),
+                rules = listOf(
+                    DnsRule(
+                        inbound = laneInbounds,
+                        action = "route",
+                        server = dnsTag,
+                        queryType = listOf("A", "AAAA")
+                    )
+                ),
+                fakeip = null
+            )
+        )
+
+        ConfigRepository.requireValidRootApplicationRoutes(config, plan)
+    }
+
+    @Test
+    fun dnsOverrideCannotReplaceRootProtectedServerOrInbound() {
+        val base = DnsConfig(
+            servers = listOf(DnsServer(tag = "local", type = "local")),
+            rules = listOf(DnsRule(inbound = listOf("root-lane-000-tcp-v4"), action = "route", server = "local"))
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            ConfigRepository.applyDnsOverride(
+                base,
+                DnsConfig(servers = listOf(DnsServer(tag = "local", type = "udp", server = "1.1.1.1"))),
+                protectedServerTags = setOf("local")
+            )
+        }
+        assertThrows(IllegalStateException::class.java) {
+            ConfigRepository.applyDnsOverride(
+                base,
+                DnsConfig(rules = listOf(DnsRule(inbound = listOf("root-lane-000-tcp-v4"), server = "local"))),
+                protectedInboundTags = setOf("root-lane-000-tcp-v4")
+            )
+        }
     }
 
     @Test

@@ -7,7 +7,7 @@ import com.google.gson.JsonParser
 import java.security.MessageDigest
 
 object RootRoutingConstants {
-    const val SCHEMA = 1
+    const val SCHEMA = 2
     const val NETFILTER_SEMANTIC_VERSION = 1
     const val MAX_LANES = 128
     const val LANE_PORT_BASE = 16_000
@@ -61,6 +61,7 @@ data class RootAppRoutingPlan(
     val ipVersionMode: String,
     val proxyIpv4: Boolean,
     val proxyIpv6: Boolean,
+    val fakeDnsEnabled: Boolean,
     val lanes: List<RootAppRouteLane>
 )
 
@@ -218,6 +219,7 @@ object RootAppRoutingPlanCompiler {
             ipVersionMode = settings.ipVersionMode.name,
             proxyIpv4 = proxyIpv4,
             proxyIpv6 = proxyIpv6,
+            fakeDnsEnabled = settings.fakeDnsEnabled,
             lanes = lanes
         )
         return plan.copy(
@@ -272,7 +274,7 @@ object RootRoutingArtifactValidator {
     private val planFields = listOf(
         "schema", "generation", "netfilterSemanticVersion", "staticPlanSha256", "appRoutingSha256",
         "configFileSha256", "routingMode", "vpnAppMode", "policyRevision", "allowlist", "blocklist",
-        "appRules", "appGroups", "ipVersionMode", "proxyIpv4", "proxyIpv6", "lanes"
+        "appRules", "appGroups", "ipVersionMode", "proxyIpv4", "proxyIpv6", "fakeDnsEnabled", "lanes"
     )
     private val ruleFields = listOf("id", "enabled", "packageName", "appName", "outboundMode", "outboundValue")
     private val groupFields = listOf("id", "enabled", "name", "outboundMode", "outboundValue", "apps")
@@ -294,8 +296,13 @@ object RootRoutingArtifactValidator {
         }
         val json = JsonParser.parseString(raw)
         val objectValue = requireObject(json, "Root routing sidecar")
-        requireFields(objectValue, planFields, "Root routing sidecar")
         requireNumber(objectValue, "schema")
+        val legacySchema = objectValue.get("schema").asLong == 1L
+        requireFields(
+            objectValue,
+            if (legacySchema) planFields - "fakeDnsEnabled" else planFields,
+            "Root routing sidecar"
+        )
         requireNumber(objectValue, "generation")
         requireNumber(objectValue, "netfilterSemanticVersion")
         requireString(objectValue, "staticPlanSha256")
@@ -308,6 +315,7 @@ object RootRoutingArtifactValidator {
         requireStringArray(objectValue, "blocklist")
         requireBoolean(objectValue, "proxyIpv4")
         requireBoolean(objectValue, "proxyIpv6")
+        if (!legacySchema) requireBoolean(objectValue, "fakeDnsEnabled")
         requireString(objectValue, "ipVersionMode")
 
         val rules = requireArray(objectValue, "appRules")
@@ -362,7 +370,7 @@ object RootRoutingArtifactValidator {
 
     @Suppress("LongMethod", "CyclomaticComplexMethod")
     fun requireBoundPlan(plan: RootAppRoutingPlan) {
-        check(plan.schema == RootRoutingConstants.SCHEMA) { "Root routing schema mismatch" }
+        check(plan.schema == 1 || plan.schema == RootRoutingConstants.SCHEMA) { "Root routing schema mismatch" }
         check(plan.generation > 0L) { "Root routing generation is invalid" }
         check(plan.netfilterSemanticVersion == RootRoutingConstants.NETFILTER_SEMANTIC_VERSION) {
             "Root netfilter semantic version mismatch"
@@ -489,7 +497,9 @@ object RootRoutingArtifactValidator {
         requireString(objectValue, "appRoutingSha256")
         val manifest = Gson().fromJson(objectValue, RootRoutingManifest::class.java)
             ?: error("Root routing manifest is empty")
-        check(manifest.schema == RootRoutingConstants.SCHEMA) { "Root manifest schema mismatch" }
+        check(manifest.schema == 1 || manifest.schema == RootRoutingConstants.SCHEMA) {
+            "Root manifest schema mismatch"
+        }
         check(manifest.generation > 0L) { "Root manifest generation is invalid" }
         check(manifest.configLength >= 0L && manifest.sidecarLength >= 0L) {
             "Root manifest length is invalid"
@@ -582,6 +592,8 @@ object RootAppRoutingCanonical {
         string("routingMode", plan.routingMode)
         string("vpnAppMode", plan.vpnAppMode)
         number("policyRevision", plan.policyRevision)
+        // Schema 1 snapshots retain their original digest for upgrade rollback.
+        if (plan.schema >= 2) bool("fakeDnsEnabled", plan.fakeDnsEnabled)
         number("laneCount", plan.lanes.size.toLong())
         plan.lanes.sortedBy(RootAppRouteLane::slot).forEachIndexed { index, lane ->
             val prefix = "lane.$index"

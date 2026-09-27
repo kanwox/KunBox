@@ -634,20 +634,13 @@ internal fun ConfigRepository.buildRunRoute(
     outbounds: List<Outbound>,
     nodeTagResolver: (String?) -> String?,
     validRuleSets: List<RuleSetConfig>,
-    rootRoutingPlan: RootAppRoutingPlan? = null
+    rootRoutingPlan: RootAppRoutingPlan? = null,
+    rootBindings: List<RootLaneRuntimeBinding>? = rootRoutingPlan?.let(ConfigRepository::buildRootLaneRuntimeBindings)
 ): RouteConfig {
     val profileUis = _profiles.value
     val appRoutingRules = if (ConfigRepository.shouldApplyCustomAndAppRules(settings.routingMode)) {
         if (rootRoutingPlan != null) {
-            rootRoutingPlan.lanes.map { lane ->
-                val baseRule = ConfigRepository.toRouteRule(
-                    ConfigRepository.rootLaneSemantic(lane),
-                    selectorTag
-                )
-                baseRule.copy(
-                    inbound = lane.inboundTags(rootRoutingPlan.proxyIpv4, rootRoutingPlan.proxyIpv6)
-                )
-            }
+            requireNotNull(rootBindings).map(RootLaneRuntimeBinding::routeRule)
         } else {
             buildAppRoutingRules(
                 settings = settings,
