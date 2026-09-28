@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,7 +13,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CloudDownload
@@ -50,10 +53,9 @@ import com.kunk.singbox.ui.theme.liquidGlassPressFeedback
 import com.kunk.singbox.ui.theme.liquidGlassTextButtonContentColor
 import com.kunk.singbox.ui.theme.liquidGlassTextButtonColors
 import com.kunk.singbox.ui.theme.liquidGlassTextButtonPanel
+import kotlinx.coroutines.launch
 import com.kunk.singbox.ui.theme.liquidGlassTopAppBarContainerColor
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import sh.calvin.reorderable.ReorderableItem
-import sh.calvin.reorderable.rememberReorderableLazyListState
 
 internal val defaultRuleSetTags = setOf(
     "geosite-cn",
@@ -100,6 +102,7 @@ fun RuleSetsScreen(
     val allNodes by nodesViewModel.allNodes.collectAsStateWithLifecycle()
     val nodesForSelection by nodesViewModel.filteredAllNodes.collectAsStateWithLifecycle()
     val profiles by profilesViewModel.profiles.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     val requestLocalNetworkPermission = rememberLocalNetworkPermissionRequest()
 
     DisposableEffect(Unit) {
@@ -151,17 +154,15 @@ fun RuleSetsScreen(
 
     // Reordering State
     val ruleSets = remember { mutableStateListOf<RuleSet>() }
-    val reorderableLazyColumnState = rememberReorderableLazyListState(listState) { from, to ->
-        val fromIndex = ruleSets.indexOfFirst { it.id == from.key }
-        val toIndex = ruleSets.indexOfFirst { it.id == to.key }
-        if (fromIndex != -1 && toIndex != -1) {
-            val item = ruleSets.removeAt(fromIndex)
-            ruleSets.add(toIndex, item)
-        }
-    }
+    // Only sync if dragging is NOT active to avoid conflicts
+    val isDragging = remember { mutableStateOf(false) }
+    var suppressPlacementAnimation by remember { mutableStateOf(false) }
+    val enablePlacementAnimation = false
 
     LaunchedEffect(settings.ruleSets) {
-        if (!reorderableLazyColumnState.isAnyItemDragging) {
+        if (!isDragging.value) {
+            // Only update if the set of IDs has changed or size changed
+            // This prevents overwriting local reordering with stale remote data immediately after drop
             val currentIds = ruleSets.map { it.id }.toSet()
             val newIds = settings.ruleSets.map { it.id }.toSet()
 
@@ -169,7 +170,15 @@ fun RuleSetsScreen(
                 ruleSets.clear()
                 ruleSets.addAll(settings.ruleSets)
             } else {
+                // If IDs match but order differs, we assume local state is correct (unless we want to force sync)
+                // To be safe, if the lists are drastically different (e.g. initial load), we sync.
+                // But for reordering, we trust the local operation.
+                // Double check if we need to sync for property updates (e.g. name change)
                 if (ruleSets.map { it.toString() } != settings.ruleSets.map { it.toString() }) {
+                    // Content might have changed, but try to preserve order if possible?
+                    // For now, simpler approach: if local state matches the ID set, we trust local order.
+                    // But if properties changed, we should update items in place?
+                    // Let's just do a smart update:
                     settings.ruleSets.forEach { newRule ->
                         val index = ruleSets.indexOfFirst { it.id == newRule.id }
                         if (index != -1 && ruleSets[index] != newRule) {
@@ -181,6 +190,13 @@ fun RuleSetsScreen(
         }
     }
 
+    var draggingItemIndex by remember { mutableStateOf<Int?>(null) }
+    var draggingItemOffset by remember { mutableFloatStateOf(0f) }
+    var draggingItemId by remember { mutableStateOf<String?>(null) }
+    var settlingItemId by remember { mutableStateOf<String?>(null) }
+    var itemHeightPx by remember { mutableFloatStateOf(0f) }
+
+    val density = androidx.compose.ui.platform.LocalDensity.current
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     fun exitSelectionMode() {
@@ -516,88 +532,223 @@ fun RuleSetsScreen(
                         }
                     }
                 }
-                items(ruleSets, key = { it.id }) { ruleSet ->
-                    ReorderableItem(
-                        state = reorderableLazyColumnState,
-                        key = ruleSet.id,
-                        enabled = !isSelectionMode
-                    ) { isDragging ->
-                        val dragScale by animateFloatAsState(
-                            targetValue = if (isDragging) 1.02f else 1f,
-                            animationSpec = spring(dampingRatio = 0.8f, stiffness = 260f),
-                            label = "dragScale"
-                        )
-                        val dragShadow by animateFloatAsState(
-                            targetValue = if (isDragging) 8f else 0f,
-                            animationSpec = spring(dampingRatio = 0.82f, stiffness = 260f),
-                            label = "dragShadow"
-                        )
-                        val dragAlpha by animateFloatAsState(
-                            targetValue = if (isDragging) 0.94f else 1f,
-                            animationSpec = spring(dampingRatio = 0.85f, stiffness = 280f),
-                            label = "dragAlpha"
-                        )
+                items(ruleSets.size, key = { ruleSets[it].id }) { index ->
+                    val ruleSet = ruleSets[index]
+                    val isDraggingItem = draggingItemIndex == index
+                    val isSettlingItem = settlingItemId == ruleSet.id
+                    val isCurrentlyDragging = isDragging.value
+                    val currentDraggingIndex = draggingItemIndex
+                    val currentDragOffset = draggingItemOffset
 
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .longPressDraggableHandle(
-                                    enabled = !isSelectionMode,
-                                    onDragStarted = {
-                                        haptic.performHapticFeedback(
-                                            HapticFeedbackType.LongPress
-                                        )
-                                    },
-                                    onDragStopped = {
-                                        settingsViewModel.reorderRuleSets(ruleSets.toList())
-                                    }
-                                )
-                                .graphicsLayer {
-                                    scaleX = dragScale
-                                    scaleY = dragScale
-                                    shadowElevation = dragShadow
-                                    alpha = dragAlpha
-                                    compositingStrategy = CompositingStrategy.ModulateAlpha
+                    var targetTranslationY = 0f
+                    var zIndex = 0f
+                    val canDisplace = !isSelectionMode &&
+                        currentDraggingIndex != null &&
+                        itemHeightPx > 0f &&
+                        !isDraggingItem
+                    if (currentDraggingIndex != null && itemHeightPx > 0f) {
+                        if (isDraggingItem) {
+                            targetTranslationY = currentDragOffset
+                            zIndex = 1f
+                        } else if (canDisplace) {
+                            val dragProgress = currentDragOffset / itemHeightPx
+                            val rawEndProgress = when {
+                                dragProgress > 0f -> kotlin.math.ceil(dragProgress)
+                                dragProgress < 0f -> kotlin.math.floor(dragProgress)
+                                else -> 0.0
+                            }
+                            val clampedStart = currentDraggingIndex.coerceIn(0, ruleSets.lastIndex)
+                            val clampedEnd = (currentDraggingIndex + rawEndProgress.toInt())
+                                .coerceIn(0, ruleSets.lastIndex)
+
+                            when {
+                                clampedStart < clampedEnd && index > clampedStart && index <= clampedEnd -> {
+                                    val itemSlotOffset = index - currentDraggingIndex
+                                    targetTranslationY = -(dragProgress - (itemSlotOffset - 1)) * itemHeightPx
+                                    targetTranslationY = targetTranslationY.coerceIn(-itemHeightPx, 0f)
                                 }
-                                .ruleSetSortItemPressFeedback(
-                                    enabled = isSelectionMode
-                                ) {
-                                    if (isSelectionMode) {
-                                        toggleSelection(ruleSet.id)
-                                    }
+                                clampedStart > clampedEnd && index < clampedStart && index >= clampedEnd -> {
+                                    val itemSlotOffset = currentDraggingIndex - index
+                                    targetTranslationY = (-dragProgress - (itemSlotOffset - 1)) * itemHeightPx
+                                    targetTranslationY = targetTranslationY.coerceIn(0f, itemHeightPx)
                                 }
-                        ) {
-                            RuleSetItem(
-                                ruleSet = ruleSet,
-                                isSelectionMode = isSelectionMode,
-                                isSelected = selectedItems[ruleSet.id] ?: false,
-                                isDownloading = downloadingRuleSets.contains(ruleSet.tag),
-                                onClick = {
-                                    if (isSelectionMode) {
-                                        toggleSelection(ruleSet.id)
-                                    }
-                                },
-                                onToggle = { enabled ->
-                                    if (enabled && ruleSet.outboundMode == RuleSetOutboundMode.DIRECT) {
-                                        requestLocalNetworkPermission {
-                                            settingsViewModel.updateRuleSet(ruleSet.copy(enabled = true))
-                                        }
-                                    } else {
-                                        settingsViewModel.updateRuleSet(ruleSet.copy(enabled = enabled))
-                                    }
-                                },
-                                onEditClick = { editingRuleSet = ruleSet },
-                                onDeleteClick = { settingsViewModel.deleteRuleSet(ruleSet.id) },
-                                onOutboundClick = {
-                                    outboundEditingRuleSet = ruleSet
-                                    showOutboundModeDialog = true
-                                },
-                                onInboundClick = {
-                                    outboundEditingRuleSet = ruleSet
-                                    showInboundDialog = true
+                            }
+                        }
+                    }
+
+                    val dragScale by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = when {
+                            isDraggingItem && isCurrentlyDragging -> 1.02f
+                            isSettlingItem -> 1.01f
+                            else -> 1f
+                        },
+                        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 260f),
+                        label = "dragScale"
+                    )
+                    val dragShadow by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = when {
+                            isDraggingItem && isCurrentlyDragging -> 8f
+                            isSettlingItem -> 4f
+                            else -> 0f
+                        },
+                        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.82f, stiffness = 260f),
+                        label = "dragShadow"
+                    )
+                    val dragAlpha by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = when {
+                            isDraggingItem && isCurrentlyDragging -> 0.94f
+                            isSettlingItem -> 0.98f
+                            else -> 1f
+                        },
+                        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.85f, stiffness = 280f),
+                        label = "dragAlpha"
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .zIndex(zIndex)
+                            .onGloballyPositioned { coordinates ->
+                                if (itemHeightPx == 0f) {
+                                    val spacingPx = with(density) { 16.dp.toPx() }
+                                    itemHeightPx = coordinates.size.height.toFloat() + spacingPx
+                                }
+                            }
+                            .graphicsLayer {
+                                this.translationY = targetTranslationY
+                                scaleX = dragScale
+                                scaleY = dragScale
+                                shadowElevation = dragShadow
+                                alpha = dragAlpha
+                                compositingStrategy = CompositingStrategy.ModulateAlpha
+                            }
+                            .then(
+                                if (!enablePlacementAnimation || suppressPlacementAnimation) {
+                                    Modifier
+                                } else {
+                                    Modifier.animateItem()
                                 }
                             )
-                        }
+                            .ruleSetSortItemPressFeedback(
+                                enabled = !isDraggingItem || !isCurrentlyDragging
+                            ) {
+                                if (isSelectionMode) {
+                                    toggleSelection(ruleSet.id)
+                                }
+                            }
+                            .pointerInput(index) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        if (!isSelectionMode) {
+                                            draggingItemIndex = index
+                                            draggingItemId = ruleSet.id
+                                            draggingItemOffset = 0f
+                                            isDragging.value = true
+                                            haptic.performHapticFeedback(
+                                                androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress
+                                            )
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        draggingItemIndex?.let { startIdx ->
+                                            val dist = if (itemHeightPx > 0f) {
+                                                kotlin.math.round(draggingItemOffset / itemHeightPx).toInt()
+                                            } else {
+                                                0
+                                            }
+                                            val endIdx = (startIdx + dist).coerceIn(0, ruleSets.lastIndex)
+
+                                            val settledRuleSetId = ruleSet.id
+                                            settlingItemId = settledRuleSetId
+                                            suppressPlacementAnimation = true
+
+                                            val absScrollBefore = if (itemHeightPx > 0f) {
+                                                listState.firstVisibleItemIndex * itemHeightPx +
+                                                    listState.firstVisibleItemScrollOffset
+                                            } else {
+                                                null
+                                            }
+
+                                            if (startIdx != endIdx) {
+                                                val item = ruleSets.removeAt(startIdx)
+                                                ruleSets.add(endIdx, item)
+                                                settingsViewModel.reorderRuleSets(ruleSets.toList())
+                                            }
+
+                                            val abs = absScrollBefore
+                                            if (abs != null && itemHeightPx > 0f) {
+                                                val targetIndex = (abs / itemHeightPx).toInt()
+                                                    .coerceIn(0, ruleSets.lastIndex)
+                                                val targetOffset = (abs - targetIndex * itemHeightPx)
+                                                    .toInt()
+                                                    .coerceAtLeast(0)
+                                                scope.launch {
+                                                    listState.scrollToItem(targetIndex, targetOffset)
+                                                }
+                                            }
+
+                                            draggingItemIndex = null
+                                            draggingItemId = null
+                                            draggingItemOffset = 0f
+                                            isDragging.value = false
+
+                                            scope.launch {
+                                                androidx.compose.runtime.withFrameNanos { }
+                                                suppressPlacementAnimation = false
+                                            }
+                                            scope.launch {
+                                                kotlinx.coroutines.delay(220)
+                                                if (settlingItemId == settledRuleSetId) {
+                                                    settlingItemId = null
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onDragCancel = {
+                                        draggingItemIndex = null
+                                        draggingItemId = null
+                                        draggingItemOffset = 0f
+                                        settlingItemId = null
+                                        isDragging.value = false
+                                        suppressPlacementAnimation = false
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        draggingItemOffset += dragAmount.y
+                                    }
+                                )
+                            }
+                    ) {
+                        RuleSetItem(
+                            ruleSet = ruleSet,
+                            isSelectionMode = isSelectionMode,
+                            isSelected = selectedItems[ruleSet.id] ?: false,
+                            isDownloading = downloadingRuleSets.contains(ruleSet.tag),
+                            onClick = {
+                                if (isSelectionMode) {
+                                    toggleSelection(ruleSet.id)
+                                }
+                            },
+                            onToggle = { enabled ->
+                                if (enabled && ruleSet.outboundMode == RuleSetOutboundMode.DIRECT) {
+                                    requestLocalNetworkPermission {
+                                        settingsViewModel.updateRuleSet(ruleSet.copy(enabled = true))
+                                    }
+                                } else {
+                                    settingsViewModel.updateRuleSet(ruleSet.copy(enabled = enabled))
+                                }
+                            },
+                            onEditClick = { editingRuleSet = ruleSet },
+                            onDeleteClick = { settingsViewModel.deleteRuleSet(ruleSet.id) },
+                            onOutboundClick = {
+                                outboundEditingRuleSet = ruleSet
+                                showOutboundModeDialog = true
+                            },
+                            onInboundClick = {
+                                outboundEditingRuleSet = ruleSet
+                                showInboundDialog = true
+                            }
+                        )
                     }
                 }
             }

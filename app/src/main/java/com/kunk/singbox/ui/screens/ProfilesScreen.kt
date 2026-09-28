@@ -8,10 +8,13 @@ import com.kunk.singbox.utils.parser.NodeLinkParser
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -24,7 +27,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -46,17 +51,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.zIndex
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import sh.calvin.reorderable.ReorderableItem
-import sh.calvin.reorderable.rememberReorderableLazyListState
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -79,7 +84,9 @@ import com.kunk.singbox.ui.theme.liquidGlassIconButtonPanel
 import com.kunk.singbox.ui.theme.liquidGlassScreenContainerColor
 import com.kunk.singbox.utils.DeepLinkHandler
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -100,6 +107,21 @@ internal fun calculateProfileDragAutoScroll(
 
     val bottomProgress = ((pointerY - viewportBottom + edgeThreshold) / edgeThreshold).coerceIn(0f, 1f)
     return maxScrollPerFrame * bottomProgress * PROFILE_DRAG_EDGE_RATIO
+}
+
+@Composable
+private fun Modifier.profileSortItemClick(
+    enabled: Boolean,
+    onClick: () -> Unit
+): Modifier {
+    val interactionSource = remember { MutableInteractionSource() }
+    // 长按重排区域禁用所有按压指示与缩放，避免松手灰底/白块
+    return clickable(
+        enabled = enabled,
+        interactionSource = interactionSource,
+        indication = null,
+        onClick = onClick
+    )
 }
 
 private suspend fun readImportContentSafely(
@@ -164,21 +186,12 @@ fun ProfilesScreen(
     val cameraPermissionRequiredMessage = stringResource(R.string.profiles_camera_permission_required)
     val clipboardEmptyMessage = stringResource(R.string.profiles_clipboard_empty)
 
-    val listState = rememberLazyListState()
-
     // Reordering state
     val profileList = remember { mutableStateListOf<com.kunk.singbox.model.ProfileUi>() }
-    val reorderableLazyColumnState = rememberReorderableLazyListState(listState) { from, to ->
-        val fromIndex = profileList.indexOfFirst { it.id == from.key }
-        val toIndex = profileList.indexOfFirst { it.id == to.key }
-        if (fromIndex != -1 && toIndex != -1) {
-            val item = profileList.removeAt(fromIndex)
-            profileList.add(toIndex, item)
-        }
-    }
+    val isDragging = remember { mutableStateOf(false) }
 
     androidx.compose.runtime.LaunchedEffect(profiles) {
-        if (!reorderableLazyColumnState.isAnyItemDragging) {
+        if (!isDragging.value) {
             val currentIds = profileList.map { it.id }.toSet()
             val newIds = profiles.map { it.id }.toSet()
             if (currentIds != newIds || profileList.size != profiles.size || profileList.isEmpty()) {
@@ -195,6 +208,16 @@ fun ProfilesScreen(
         }
     }
 
+    var draggingItemIndex by remember { mutableStateOf<Int?>(null) }
+    var draggingItemOffset by remember { mutableFloatStateOf(0f) }
+    var draggingItemId by remember { mutableStateOf<String?>(null) }
+    var itemHeightPx by remember { mutableFloatStateOf(0f) }
+    var dragPointerY by remember { mutableFloatStateOf(0f) }
+    var listViewportTop by remember { mutableFloatStateOf(0f) }
+    var listViewportBottom by remember { mutableFloatStateOf(0f) }
+    var autoScrollJob by remember { mutableStateOf<Job?>(null) }
+
+    val density = androidx.compose.ui.platform.LocalDensity.current
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
@@ -282,6 +305,8 @@ fun ProfilesScreen(
     }
 
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+
     var isFabVisible by remember { mutableStateOf(true) }
 
     val nestedScrollConnection = remember {
@@ -633,7 +658,13 @@ fun ProfilesScreen(
             ) { contentTopPadding ->
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .onGloballyPositioned { coordinates ->
+                            val top = coordinates.positionInWindow().y
+                            listViewportTop = top
+                            listViewportBottom = top + coordinates.size.height
+                        },
                     contentPadding = PaddingValues(
                         start = 16.dp,
                         top = contentTopPadding + 16.dp,
@@ -642,76 +673,195 @@ fun ProfilesScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(profileList, key = { it.id }) { profile ->
-                        ReorderableItem(
-                            state = reorderableLazyColumnState,
-                            key = profile.id
-                        ) { isDragging ->
-                            val dragScale by animateFloatAsState(
-                                targetValue = if (isDragging) 1.02f else 1f,
-                                animationSpec = spring(dampingRatio = 0.8f, stiffness = 260f),
-                                label = "profileDragScale"
-                            )
-                            val dragShadow by animateFloatAsState(
-                                targetValue = if (isDragging) 8f else 0f,
-                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 260f),
-                                label = "profileDragShadow"
-                            )
-                            val dragAlpha by animateFloatAsState(
-                                targetValue = if (isDragging) 0.94f else 1f,
-                                animationSpec = spring(dampingRatio = 0.85f, stiffness = 280f),
-                                label = "profileDragAlpha"
-                            )
+                    items(profileList.size, key = { profileList[it].id }) { index ->
+                        val profile = profileList[index]
+                        var itemWindowTop by remember(profile.id) { mutableFloatStateOf(0f) }
 
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .longPressDraggableHandle(
-                                        onDragStarted = {
+                        val isDraggingItem = draggingItemIndex == index
+                        val isCurrentlyDragging = isDragging.value
+                        val canDisplace = isCurrentlyDragging &&
+                            draggingItemIndex != null &&
+                            itemHeightPx > 0 &&
+                            !isDraggingItem
+
+                        var translationY = 0f
+                        if (canDisplace) {
+                            val startIdx = draggingItemIndex ?: index
+                            val dragProgress = draggingItemOffset / itemHeightPx
+                            val rawEndProgress = when {
+                                dragProgress > 0f -> kotlin.math.ceil(dragProgress)
+                                dragProgress < 0f -> kotlin.math.floor(dragProgress)
+                                else -> 0.0
+                            }
+                            val clampedStart = startIdx.coerceIn(0, profileList.lastIndex)
+                            val clampedEnd = (startIdx + rawEndProgress.toInt()).coerceIn(0, profileList.lastIndex)
+                            when {
+                                clampedStart < clampedEnd && index > clampedStart && index <= clampedEnd -> {
+                                    val itemSlotOffset = index - startIdx
+                                    translationY = -(dragProgress - (itemSlotOffset - 1)) * itemHeightPx
+                                    translationY = translationY.coerceIn(-itemHeightPx, 0f)
+                                }
+                                clampedStart > clampedEnd && index < clampedStart && index >= clampedEnd -> {
+                                    val itemSlotOffset = startIdx - index
+                                    translationY = (-dragProgress - (itemSlotOffset - 1)) * itemHeightPx
+                                    translationY = translationY.coerceIn(0f, itemHeightPx)
+                                }
+                            }
+                        }
+
+                        // 长按拖拽不做阴影/缩放/透明样式，只保留位移重排，避免松手白块/灰底
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .zIndex(if (isDraggingItem && isCurrentlyDragging) 1f else 0f)
+                                .onGloballyPositioned { coordinates ->
+                                    itemWindowTop = coordinates.positionInWindow().y
+                                    if (itemHeightPx == 0f) {
+                                        val spacingPx = with(density) { 12.dp.toPx() }
+                                        itemHeightPx = coordinates.size.height.toFloat() + spacingPx
+                                    }
+                                }
+                                .graphicsLayer {
+                                    this.translationY = if (isDraggingItem) draggingItemOffset else translationY
+                                }
+                                .profileSortItemClick(
+                                    enabled = !isDraggingItem || !isCurrentlyDragging
+                                ) {
+                                    viewModel.setActiveProfile(profile.id)
+                                }
+                                .pointerInput(index) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { startOffset ->
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
+                                            draggingItemIndex = index
+                                            draggingItemId = profile.id
+                                            draggingItemOffset = 0f
+                                            dragPointerY = itemWindowTop + startOffset.y
+                                            isDragging.value = true
                                             haptic.performHapticFeedback(
-                                                HapticFeedbackType.LongPress
+                                                androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress
                                             )
                                         },
-                                        onDragStopped = {
-                                            viewModel.reorderProfiles(profileList.toList())
+                                        onDragEnd = {
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
+                                            draggingItemIndex?.let { startIdx ->
+                                                val dist = if (itemHeightPx > 0f) {
+                                                    kotlin.math.round(draggingItemOffset / itemHeightPx).toInt()
+                                                } else {
+                                                    0
+                                                }
+                                                val endIdx = (startIdx + dist).coerceIn(0, profileList.lastIndex)
+
+                                                val absScrollBefore = if (itemHeightPx > 0f) {
+                                                    listState.firstVisibleItemIndex * itemHeightPx +
+                                                        listState.firstVisibleItemScrollOffset
+                                                } else {
+                                                    null
+                                                }
+
+                                                if (startIdx != endIdx) {
+                                                    val item = profileList.removeAt(startIdx)
+                                                    profileList.add(endIdx, item)
+                                                    viewModel.reorderProfiles(profileList.toList())
+                                                }
+
+                                                val abs = absScrollBefore
+                                                if (abs != null && itemHeightPx > 0f) {
+                                                    val targetIndex = (abs / itemHeightPx).toInt()
+                                                        .coerceIn(0, profileList.lastIndex)
+                                                    val targetOffset = (abs - targetIndex * itemHeightPx)
+                                                        .toInt()
+                                                        .coerceAtLeast(0)
+                                                    scope.launch {
+                                                        listState.scrollToItem(targetIndex, targetOffset)
+                                                    }
+                                                }
+
+                                                draggingItemIndex = null
+                                                draggingItemOffset = 0f
+                                                draggingItemId = null
+                                                isDragging.value = false
+                                            }
+                                        },
+                                        onDragCancel = {
+                                            autoScrollJob?.cancel()
+                                            autoScrollJob = null
+                                            draggingItemIndex = null
+                                            draggingItemId = null
+                                            draggingItemOffset = 0f
+                                            isDragging.value = false
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            draggingItemOffset += dragAmount.y
+                                            dragPointerY += dragAmount.y
+
+                                            val edgeThreshold = with(density) { 56.dp.toPx() }
+                                            val maxScrollPerFrame = with(density) { 32.dp.toPx() }
+                                            val scrollPerFrame = calculateProfileDragAutoScroll(
+                                                pointerY = dragPointerY,
+                                                viewportTop = listViewportTop,
+                                                viewportBottom = listViewportBottom,
+                                                edgeThreshold = edgeThreshold,
+                                                maxScrollPerFrame = maxScrollPerFrame
+                                            )
+                                            if (scrollPerFrame == 0f) {
+                                                autoScrollJob?.cancel()
+                                                autoScrollJob = null
+                                            } else if (autoScrollJob?.isActive != true) {
+                                                autoScrollJob = scope.launch {
+                                                    var keepScrolling = true
+                                                    while (isActive && isDragging.value && keepScrolling) {
+                                                        androidx.compose.runtime.withFrameNanos { }
+                                                        val frameScroll = calculateProfileDragAutoScroll(
+                                                            pointerY = dragPointerY,
+                                                            viewportTop = listViewportTop,
+                                                            viewportBottom = listViewportBottom,
+                                                            edgeThreshold = edgeThreshold,
+                                                            maxScrollPerFrame = maxScrollPerFrame
+                                                        )
+                                                        val consumed = if (frameScroll == 0f) {
+                                                            0f
+                                                        } else {
+                                                            listState.scrollBy(frameScroll)
+                                                        }
+                                                        keepScrolling = frameScroll != 0f && consumed != 0f
+                                                        draggingItemOffset += consumed
+                                                    }
+                                                }
+                                            }
                                         }
                                     )
-                                    .graphicsLayer {
-                                        scaleX = dragScale
-                                        scaleY = dragScale
-                                        shadowElevation = dragShadow
-                                        alpha = dragAlpha
-                                        compositingStrategy = CompositingStrategy.ModulateAlpha
+                                }
+                        ) {
+                            ProfileCard(
+                                name = profile.name,
+                                type = profile.type.name,
+                                isSelected = profile.id == activeProfileId,
+                                isSwitching = switchingProfileId == profile.id,
+                                isEnabled = profile.enabled,
+                                isUpdating = profile.updateStatus == UpdateStatus.Updating,
+                                updateStatus = profile.updateStatus,
+                                updateStage = profile.updateStage,
+                                expireDate = profile.expireDate,
+                                totalTraffic = profile.totalTraffic,
+                                usedTraffic = profile.usedTraffic,
+                                lastUpdated = profile.lastUpdated,
+                                onClick = { viewModel.setActiveProfile(profile.id) },
+                                onUpdate = { viewModel.updateProfile(profile.id) },
+                                onToggle = { viewModel.toggleProfileEnabled(profile.id) },
+                                onEdit = {
+                                    if (profile.type == com.kunk.singbox.model.ProfileType.Subscription ||
+                                        profile.type == com.kunk.singbox.model.ProfileType.Imported) {
+                                        editingProfile = profile
+                                    } else {
+                                        navController.navigate(Screen.ProfileEditor.createRoute(profile.id))
                                     }
-                            ) {
-                                ProfileCard(
-                                    name = profile.name,
-                                    type = profile.type.name,
-                                    isSelected = profile.id == activeProfileId,
-                                    isSwitching = switchingProfileId == profile.id,
-                                    isEnabled = profile.enabled,
-                                    isUpdating = profile.updateStatus == UpdateStatus.Updating,
-                                    updateStatus = profile.updateStatus,
-                                    updateStage = profile.updateStage,
-                                    expireDate = profile.expireDate,
-                                    totalTraffic = profile.totalTraffic,
-                                    usedTraffic = profile.usedTraffic,
-                                    lastUpdated = profile.lastUpdated,
-                                    onClick = { viewModel.setActiveProfile(profile.id) },
-                                    onUpdate = { viewModel.updateProfile(profile.id) },
-                                    onToggle = { viewModel.toggleProfileEnabled(profile.id) },
-                                    onEdit = {
-                                        if (profile.type == com.kunk.singbox.model.ProfileType.Subscription ||
-                                            profile.type == com.kunk.singbox.model.ProfileType.Imported
-                                        ) {
-                                            editingProfile = profile
-                                        } else {
-                                            navController.navigate(Screen.ProfileEditor.createRoute(profile.id))
-                                        }
-                                    },
-                                    onDelete = { profileToDelete = profile }
-                                )
-                            }
+                                },
+                                onDelete = { profileToDelete = profile }
+                            )
                         }
                     }
                 }
