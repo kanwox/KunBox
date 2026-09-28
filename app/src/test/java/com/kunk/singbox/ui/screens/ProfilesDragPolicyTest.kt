@@ -39,23 +39,12 @@ class ProfilesDragPolicyTest {
     }
 
     @Test
-    fun dragKeepsPlainVisualWithoutPressStyle() {
+    fun dragUsesReorderableLibrary() {
         val source = File("src/main/java/com/kunk/singbox/ui/screens/ProfilesScreen.kt")
             .readText(Charsets.UTF_8)
 
-        assertTrue(source.contains("indication = null"))
-        assertTrue(source.contains("profileSortItemClick"))
-        assertTrue(!source.contains("shadowElevation"))
-        assertTrue(!source.contains("dragScale"))
-        assertTrue(!source.contains("dragShadow"))
-        assertTrue(!source.contains("dragAlpha"))
-        assertTrue(!source.contains("isSettlingItem"))
-        assertTrue(!source.contains("settlingItemId"))
-        assertTrue(!source.contains("liquidGlassPressFeedback"))
-        assertTrue(!source.contains("enablePlacementAnimation"))
-        assertTrue(!source.contains("suppressPlacementAnimation"))
-        assertTrue(!source.contains("Modifier.animateItem()"))
-        assertTrue(source.contains("listState.scrollToItem"))
-        assertTrue(source.contains("listState.scrollBy"))
+        assertTrue(source.contains("rememberReorderableLazyListState"))
+        assertTrue(source.contains("ReorderableItem"))
+        assertTrue(source.contains("longPressDraggableHandle"))
     }
 }
